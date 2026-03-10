@@ -23,6 +23,9 @@ dependencies:
   file_picker: ^10.3.10
   path_provider: ^2.1.5
   cupertino_icons: ^1.0.8
+  exif: ^3.1.4          # 写真の撮影情報やGPS情報を取得
+  geocoding: ^3.0.0     # 緯度経度から「長野市」などの住所に変換
+  url_launcher: ^6.2.6  # Google Mapsを開く
 
 dev_dependencies:
   flutter_test:
