@@ -1,0 +1,42 @@
+name: my_photo_app
+description: "A new Flutter project."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.11.1
+
+dependencies:
+  flutter:
+    sdk: flutter
+  
+  # 動画再生（Windows対応版）
+  media_kit: any
+  media_kit_video: any
+  media_kit_libs_video: any
+  
+  # サムネイル（Windowsネイティブ版）
+  fc_native_video_thumbnail: ^0.5.2
+  
+  intl: ^0.20.2
+  shared_preferences: ^2.5.4
+  file_picker: ^10.3.10
+  path_provider: ^2.1.5
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  msix: ^3.16.13
+
+flutter:
+  uses-material-design: true
+
+msix_config:
+  display_name: My Photo App
+  publisher_display_name: Nakio
+  publisher: CN=Nakio
+  identity_name: com.Nakio.myphotoapp
+  msix_version: 1.0.0.0
+  capabilities: internetClient
