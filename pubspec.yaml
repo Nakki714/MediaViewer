@@ -23,9 +23,7 @@ dependencies:
   file_picker: ^10.3.10
   path_provider: ^2.1.5
   cupertino_icons: ^1.0.8
-  exif: ^3.1.4          # 写真の撮影情報やGPS情報を取得
-  geocoding: ^3.0.0     # 緯度経度から「長野市」などの住所に変換
-  url_launcher: ^6.2.6  # Google Mapsを開く
+  exif: ^3.1.4          
   window_manager: ^0.3.9
 
 dev_dependencies:
@@ -38,9 +36,9 @@ flutter:
   uses-material-design: true
 
 msix_config:
-  display_name: My Photo App
-  publisher_display_name: Nakio
-  publisher: CN=Nakio
-  identity_name: com.Nakio.myphotoapp
+  display_name: Media Viewer
+  publisher_display_name: Nakki714
+  publisher: CN=Nakki714
+  identity_name: com.Nakki714.Media Viewer
   msix_version: 1.0.0.0
   capabilities: internetClient
