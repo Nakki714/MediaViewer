@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import 'dart:io';
 import 'dart:isolate';
 import 'package:intl/intl.dart';
@@ -14,11 +15,21 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:fc_native_video_thumbnail/fc_native_video_thumbnail.dart';
 import 'package:exif/exif.dart';
-import 'package:geocoding/geocoding.dart';
-import 'package:url_launcher/url_launcher.dart';
+import 'package:window_manager/window_manager.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await windowManager.ensureInitialized();
+  
+  WindowOptions windowOptions = const WindowOptions(
+    title: 'どこでもフォト',
+    center: true,
+  );
+  windowManager.waitUntilReadyToShow(windowOptions, () async {
+    await windowManager.show();
+    await windowManager.focus();
+  });
+
   await initializeDateFormatting('ja_JP', null);
   MediaKit.ensureInitialized();
   runApp(const MyPhotoApp());
@@ -72,8 +83,6 @@ class MediaItem {
   final DateTime date;
   final MediaType type;
   final int sizeBytes;
-  String? cityLocation; // 後から非同期で追加
-  double aspectRatio = 1.0; // グリッド用（初期値1.0）
 
   MediaItem(this.file, this.date, this.type, this.sizeBytes);
 }
@@ -88,18 +97,29 @@ class PhotoGalleryPage extends StatefulWidget {
 class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
   Map<String, List<MediaItem>> _groupedItems = {};
   List<MediaItem> _flatItems = [];
+
+  SnackBar? _downloadSnackBar;
+final ValueNotifier<String> _downloadStatus = ValueNotifier("");
   final Set<MediaItem> _selectedItems = {};
-  MediaItem? _pivotItem; // Shiftクリック用の起点
+  MediaItem? _pivotItem;
   
   bool _isScanning = false;
+  int _columns = 8;
   String? _targetPath;
   String? _downloadPath;
-  final Map<String, String> _locationCache = {}; // 座標ハッシュ -> 市区町村 のキャッシュ
+  
+  final FocusNode _gridFocusNode = FocusNode();
 
   @override
   void initState() {
     super.initState();
     _loadSavedPaths();
+  }
+
+  @override
+  void dispose() {
+    _gridFocusNode.dispose();
+    super.dispose();
   }
 
   Future<void> _loadSavedPaths() async {
@@ -108,7 +128,9 @@ class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
       _targetPath = prefs.getString('target_path');
       _downloadPath = prefs.getString('download_path');
     });
-    if (_targetPath != null) _scanPhotosBackground();
+    if (_targetPath != null) {
+      _scanPhotosBackground();
+    }
   }
 
   Future<void> _pickPath(bool isSource) async {
@@ -126,26 +148,22 @@ class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
     }
   }
 
-  // 【追加】_scanPhotosBackgroundから呼び出されるUI更新用のヘルパーメソッド
-  void _updateUI(List<MediaItem> items, {required bool sort}) {
-    if (!mounted) return;
+  void _toggleColumns() {
     setState(() {
-      _flatItems = List.from(items);
-      if (sort) {
-        _flatItems.sort((a, b) => b.date.compareTo(a.date));
+      if (_columns == 8) {
+        _columns = 10;
+      } else if (_columns == 10) {
+        _columns = 12;
+      } else {
+        _columns = 8;
       }
-      final Map<String, List<MediaItem>> grouped = {};
-      for (var item in _flatItems) {
-        String day = DateFormat('yyyy年MM月dd日(E)', 'ja_JP').format(item.date);
-        grouped.putIfAbsent(day, () => []).add(item);
-      }
-      _groupedItems = grouped;
     });
   }
 
-  // 【改善】リアルタイム表示とバックグラウンド処理を両立させるIsolate通信
   Future<void> _scanPhotosBackground() async {
-    if (_targetPath == null || _isScanning) return;
+    if (_targetPath == null || _isScanning) {
+      return;
+    }
     setState(() {
       _isScanning = true;
       _selectedItems.clear();
@@ -154,39 +172,95 @@ class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
     });
 
     try {
-      // 裏側スレッドとの通信用ポートを作成
       final receivePort = ReceivePort();
       await Isolate.spawn(_isolateScanTask, [_targetPath!, receivePort.sendPort]);
 
       List<MediaItem> buffer = [];
       DateTime lastUpdate = DateTime.now();
 
-      // 裏側からファイルが届くたびに受け取る
       await for (final message in receivePort) {
         if (message == null) {
-          break; // スキャン完了の合図
-        } else if (message is MediaItem) {
+          break;
+        }
+        if (message is MediaItem) {
           buffer.add(message);
-
-          // 500ミリ秒ごとに画面を更新（これで見つけた端から画像が出てきます）
           if (DateTime.now().difference(lastUpdate).inMilliseconds > 500) {
             _updateUI(buffer, sort: false);
             lastUpdate = DateTime.now();
           }
         }
       }
-
-      // 最後に全件を日付順にソートして完了
       _updateUI(buffer, sort: true);
-      _fetchLocationsForGroups(); // 位置情報の取得を開始
     } catch (e) {
       debugPrint('Scan Error: $e');
     } finally {
-      if (mounted) setState(() => _isScanning = false);
+      if (mounted) {
+        setState(() => _isScanning = false);
+      }
     }
   }
 
-  // 裏側スレッドで実行されるタスク（メインスレッドを止めない）
+  static Future<DateTime?> _getVideoMediaDate(File file) async {
+    RandomAccessFile? raf;
+    try {
+      raf = await file.open(mode: FileMode.read);
+      final length = await raf.length();
+      int offset = 0;
+
+      while (offset < length) {
+        raf.setPositionSync(offset);
+        final header = raf.readSync(8);
+        if (header.length < 8) break;
+
+        int size = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
+        final type = String.fromCharCodes(header.sublist(4, 8));
+
+        if (size == 1) {
+          final extSize = raf.readSync(8);
+          int upper = (extSize[0] << 24) | (extSize[1] << 16) | (extSize[2] << 8) | extSize[3];
+          int lower = (extSize[4] << 24) | (extSize[5] << 16) | (extSize[6] << 8) | extSize[7];
+          size = (upper * 4294967296) + lower;
+          if (type != 'moov' && type != 'mvhd') {
+            offset += size;
+            continue;
+          }
+        } else if (size < 8) {
+          break;
+        }
+
+        if (type == 'moov') {
+          offset += (size == 1) ? 16 : 8; 
+        } else if (type == 'mvhd') {
+          final mvhdData = raf.readSync(32);
+          final version = mvhdData[0];
+          int creationTime = 0;
+          
+          if (version == 0) {
+            creationTime = (mvhdData[4] << 24) | (mvhdData[5] << 16) | (mvhdData[6] << 8) | mvhdData[7];
+          } else if (version == 1) {
+            int upper = (mvhdData[4] << 24) | (mvhdData[5] << 16) | (mvhdData[6] << 8) | mvhdData[7];
+            int lower = (mvhdData[8] << 24) | (mvhdData[9] << 16) | (mvhdData[10] << 8) | mvhdData[11];
+            creationTime = (upper * 4294967296) + lower;
+          }
+
+          if (creationTime > 0) {
+            final unixEpoch = creationTime - 2082844800;
+            if (unixEpoch > 0) {
+              return DateTime.fromMillisecondsSinceEpoch(unixEpoch * 1000);
+            }
+          }
+          break;
+        } else {
+          offset += size; 
+        }
+      }
+    } catch (_) {
+    } finally {
+      raf?.closeSync();
+    }
+    return null;
+  }
+
   static Future<void> _isolateScanTask(List<dynamic> args) async {
     String targetPath = args[0];
     SendPort sendPort = args[1];
@@ -198,14 +272,13 @@ class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
         return;
       }
 
-      // 非同期のリストアップを使うことで、ネットワークドライブでも1件ずつ即座に処理可能
       final stream = dir.list(recursive: true, followLinks: false);
       await for (final entity in stream) {
         if (entity is File) {
           final path = entity.path.toLowerCase();
           MediaType? type;
           
-          if (path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png') || path.endsWith('.heic')) {
+          if (path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png') || path.endsWith('.heic') || path.endsWith('.webp')) {
             type = MediaType.image;
           } else if (path.endsWith('.mp4') || path.endsWith('.mov') || path.endsWith('.avi') || path.endsWith('.mkv')) {
             type = MediaType.video;
@@ -213,80 +286,149 @@ class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
 
           if (type != null) {
             final stat = await entity.stat();
-            // 見つけたファイルをその都度メインの画面に投げ飛ばす
-            sendPort.send(MediaItem(entity, stat.modified, type, stat.size));
+            DateTime fileDate = stat.changed; 
+
+            if (type == MediaType.image) {
+              try {
+                final fileStream = entity.openRead(0, 65536);
+                final bytes = <int>[];
+                await for (final chunk in fileStream) {
+                  bytes.addAll(chunk);
+                }
+                final tags = await readExifFromBytes(bytes);
+                if (tags.containsKey('EXIF DateTimeOriginal')) {
+                  String ds = tags['EXIF DateTimeOriginal']!.printable;
+                  fileDate = DateFormat("yyyy:MM:dd HH:mm:ss").parse(ds);
+                }
+              } catch (_) {}
+            } else if (type == MediaType.video) {
+              final mediaDate = await _getVideoMediaDate(entity);
+              if (mediaDate != null) {
+                fileDate = mediaDate;
+              }
+            }
+            sendPort.send(MediaItem(entity, fileDate, type, stat.size));
           }
         }
       }
-    } catch (e) {
-      // 読み取り権限がないファイルなどは無視して進める
-    } finally {
-      // 最後に完了の合図(null)を送る
+    } catch (_) {} finally {
       sendPort.send(null);
     }
   }
 
-  // 各日付グループの代表写真から位置情報を取得（重いのでメインスレッドで少しずつ実行）
-  Future<void> _fetchLocationsForGroups() async {
-    for (var dateKey in _groupedItems.keys) {
-      if (!mounted) break;
-      final items = _groupedItems[dateKey]!;
-      List<String> cities = [];
-      
-      // グループ内の最大5件まで位置情報をチェック（API制限対策と高速化のため）
-      int checkCount = min(items.length, 5);
-      for (int i = 0; i < checkCount; i++) {
-        if (items[i].type == MediaType.image) {
-          try {
-            final bytes = await items[i].file.readAsBytes();
-            final tags = await readExifFromBytes(bytes);
-            if (tags.containsKey('GPS GPSLatitude') && tags.containsKey('GPS GPSLongitude')) {
-              final lat = _convertExifToDouble(tags['GPS GPSLatitude']!.values.toList());
-              final lon = _convertExifToDouble(tags['GPS GPSLongitude']!.values.toList());
-              final hash = "${lat.toStringAsFixed(3)},${lon.toStringAsFixed(3)}";
-
-              if (_locationCache.containsKey(hash)) {
-                if (!cities.contains(_locationCache[hash]!)) cities.add(_locationCache[hash]!);
-              } else {
-                List<Placemark> placemarks = await placemarkFromCoordinates(lat, lon);
-                if (placemarks.isNotEmpty) {
-                  String city = placemarks.first.locality ?? placemarks.first.administrativeArea ?? "";
-                  if (city.isNotEmpty) {
-                    _locationCache[hash] = city;
-                    if (!cities.contains(city)) cities.add(city);
-                  }
-                }
-              }
-            }
-          } catch (e) {
-            // EXIFがない、または読めない場合はスキップ
-          }
-        }
-      }
-
-      if (cities.isNotEmpty && mounted) {
-        setState(() {
-          for (var item in items) {
-            if (cities.length == 1) {
-              item.cityLocation = cities.first;
-            } else {
-              item.cityLocation = "${cities.first}と他${cities.length - 1}か所";
-            }
-          }
-        });
-      }
+  void _updateUI(List<MediaItem> items, {bool sort = true}) {
+    if (sort) {
+      items.sort((a, b) => b.date.compareTo(a.date));
+    }
+    _flatItems = List.from(items);
+    final Map<String, List<MediaItem>> grouped = {};
+    for (var item in items) {
+      String day = DateFormat('yyyy年MM月dd日(E)', 'ja_JP').format(item.date);
+      grouped.putIfAbsent(day, () => []).add(item);
+    }
+    if (mounted) {
+      setState(() => _groupedItems = grouped);
     }
   }
 
-  double _convertExifToDouble(List<dynamic> values) {
-    if (values.length != 3) return 0.0;
-    double d = values[0].numerator / values[0].denominator;
-    double m = values[1].numerator / values[1].denominator;
-    double s = values[2].numerator / values[2].denominator;
-    return d + (m / 60.0) + (s / 3600.0);
+  Future<void> _downloadSelected() async {
+
+  if (_downloadPath == null) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('メニューから「ダウンロード先の設定」を行ってください')),
+    );
+    return;
   }
 
-  // 【改善】Excelライクな複数選択の実装
+  final total = _selectedItems.length;
+  int completed = 0;
+
+  final startTime = DateTime.now();
+
+  // 最初にSnackBarを1回だけ作る
+  _downloadStatus.value = "ダウンロード開始";
+
+_downloadSnackBar = SnackBar(
+  duration: const Duration(days: 1),
+  content: ValueListenableBuilder<String>(
+    valueListenable: _downloadStatus,
+    builder: (context, text, _) {
+      return Text(text);
+    },
+  ),
+);
+
+  ScaffoldMessenger.of(context).showSnackBar(_downloadSnackBar!);
+
+  for (var item in _selectedItems) {
+
+    try {
+
+      final fileName = item.file.path.split(Platform.pathSeparator).last;
+      final destPath = '$_downloadPath${Platform.pathSeparator}$fileName';
+
+      await item.file.copy(destPath);
+
+      completed++;
+
+      final elapsed = DateTime.now().difference(startTime).inSeconds;
+      final avg = elapsed / completed;
+      final remaining = ((total - completed) * avg).round();
+
+      if (!mounted) return;
+
+     _downloadStatus.value =
+    '$total件中 $completed件ダウンロード中\n残り約${remaining}秒';
+
+setState(() {});
+    } catch (e) {
+      debugPrint('Copy error: $e');
+    }
+  }
+
+  if (!mounted) return;
+
+  _downloadStatus.value = '$total件ダウンロード完了';
+  await Future.delayed(const Duration(seconds: 2));
+ScaffoldMessenger.of(context).hideCurrentSnackBar();
+
+await Future.delayed(const Duration(seconds: 2));
+
+ScaffoldMessenger.of(context).hideCurrentSnackBar();
+
+  _clearSelection();
+}
+
+  Future<void> _deleteSelected() async {
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('削除の確認'),
+        content: Text('${_selectedItems.length}件のファイルを削除しますか？\n（ディスクから完全に削除されます）'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('削除', style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    );
+
+    if (confirm != true) {
+      return;
+    }
+
+    for (var item in _selectedItems) {
+      try {
+        if (item.file.existsSync()) {
+          await item.file.delete();
+        }
+      } catch (e) {
+        debugPrint('Delete error: $e');
+      }
+    }
+    _clearSelection();
+    _scanPhotosBackground(); 
+  }
+
   void _handleItemTap(MediaItem item) {
     final keys = HardwareKeyboard.instance.logicalKeysPressed;
     final isCtrl = keys.contains(LogicalKeyboardKey.controlLeft) || keys.contains(LogicalKeyboardKey.controlRight);
@@ -294,16 +436,20 @@ class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
 
     setState(() {
       if (isShift && _pivotItem != null) {
-        // Shiftクリック: 範囲選択
         int start = _flatItems.indexOf(_pivotItem!);
         int end = _flatItems.indexOf(item);
-        if (start > end) { int tmp = start; start = end; end = tmp; }
-        if (!isCtrl) _selectedItems.clear(); // Ctrl同時押しでなければ既存の選択をクリア
+        if (start > end) { 
+          int tmp = start; 
+          start = end; 
+          end = tmp; 
+        }
+        if (!isCtrl) {
+          _selectedItems.clear();
+        }
         for (int i = start; i <= end; i++) {
           _selectedItems.add(_flatItems[i]);
         }
-      } else if (isCtrl) {
-        // Ctrlクリック: 個別トグル
+      } else if (isCtrl || _selectedItems.isNotEmpty) {
         if (_selectedItems.contains(item)) {
           _selectedItems.remove(item);
         } else {
@@ -311,19 +457,13 @@ class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
         }
         _pivotItem = item;
       } else {
-        if (_selectedItems.isNotEmpty) {
-           // 選択モード中に普通にクリックしたら選択解除
-           _selectedItems.clear();
-        } else {
-          // 単一クリック: 詳細ビューへ
-          _pivotItem = item;
-          Navigator.push(context, MaterialPageRoute(builder: (_) => DetailView(
-            items: _flatItems, 
-            initialIndex: _flatItems.indexOf(item), 
-            downloadPath: _downloadPath,
-            onDelete: () => _scanPhotosBackground(),
-          )));
-        }
+        _pivotItem = item;
+        Navigator.push(context, MaterialPageRoute(builder: (_) => DetailView(
+          items: _flatItems, 
+          initialIndex: _flatItems.indexOf(item), 
+          downloadPath: _downloadPath,
+          onDelete: () => _scanPhotosBackground(),
+        )));
       }
     });
   }
@@ -340,118 +480,120 @@ class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     bool isSelectionMode = _selectedItems.isNotEmpty;
 
-    return Scaffold(
-      appBar: AppBar(
-        toolbarHeight: 50,
-        title: Text(isSelectionMode ? '${_selectedItems.length}件選択中' : 'マイフォト', style: const TextStyle(fontSize: 16)),
-        actions: [
-          if (_isScanning) const Center(child: Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)))),
-          if (isSelectionMode) ...[
-            IconButton(icon: const Icon(Icons.download, color: Colors.blue), onPressed: () {}), // 一括DL処理等
-            IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: () {}), // 一括削除等
-            IconButton(icon: const Icon(Icons.close), onPressed: _clearSelection),
-          ] else ...[
-            IconButton(icon: const Icon(Icons.refresh), onPressed: _scanPhotosBackground),
-          ]
-        ],
-      ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            color: Theme.of(context).cardColor,
-            child: Row(
-              children: [
-                _buildMenuButton('ファイル', [
-                  PopupMenuItem(child: const Text('フォルダを開く'), onTap: () => Future(() => _pickPath(true))),
-                  PopupMenuItem(child: const Text('ダウンロード先の設定'), onTap: () => Future(() => _pickPath(false))),
-                  PopupMenuItem(child: const Text('終了'), onTap: () => exit(0)),
-                ]),
-                _buildMenuButton('表示', [
-                  PopupMenuItem(child: Text(isDark ? 'ライトモード' : 'ダークモード'), onTap: () => Future(() => widget.onThemeChanged(!isDark))),
-                ]),
-              ],
+    return KeyboardListener(
+      focusNode: _gridFocusNode..requestFocus(),
+      onKeyEvent: (event) {
+        if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.escape) {
+          if (isSelectionMode) {
+            _clearSelection();
+          }
+        }
+      },
+      child: Scaffold(
+        appBar: AppBar(
+          toolbarHeight: 50,
+          title: Text(isSelectionMode ? '${_selectedItems.length}件選択中' : 'マイフォト', style: const TextStyle(fontSize: 16)),
+          actions: [
+            if (_isScanning) const Center(child: Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)))),
+            if (isSelectionMode) ...[
+              IconButton(icon: const Icon(Icons.download, color: Colors.blue), onPressed: _downloadSelected),
+              IconButton(icon: const Icon(Icons.delete, color: Colors.red), onPressed: _deleteSelected),
+              IconButton(icon: const Icon(Icons.close), onPressed: _clearSelection),
+            ] else ...[
+              IconButton(icon: const Icon(Icons.grid_view), onPressed: _toggleColumns),
+              IconButton(icon: const Icon(Icons.refresh), onPressed: _scanPhotosBackground),
+            ]
+          ],
+        ),
+        body: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              color: Theme.of(context).cardColor,
+              child: Row(
+                children: [
+                  _buildMenuButton('ファイル', [
+                    PopupMenuItem(child: const Text('フォルダを開く'), onTap: () => Future(() => _pickPath(true))),
+                    PopupMenuItem(child: const Text('ダウンロード先の設定'), onTap: () => Future(() => _pickPath(false))),
+                    PopupMenuItem(child: const Text('終了'), onTap: () => exit(0)),
+                  ]),
+                  _buildMenuButton('表示', [
+                    PopupMenuItem(child: Text(isDark ? 'ライトモード' : 'ダークモード'), onTap: () => Future(() => widget.onThemeChanged(!isDark))),
+                  ]),
+                ],
+              ),
             ),
-          ),
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-            child: Text(_targetPath ?? 'フォルダ未選択', style: const TextStyle(fontSize: 11, color: Colors.grey)),
-          ),
-          Expanded(
-            child: _targetPath == null 
-              ? Center(child: ElevatedButton(onPressed: () => _pickPath(true), child: const Text('フォルダを選択')))
-              : ListView.builder(
-                  itemCount: _groupedItems.length,
-                  itemBuilder: (context, index) {
-                    final dateKey = _groupedItems.keys.elementAt(index);
-                    final items = _groupedItems[dateKey]!;
-                    final locationText = items.first.cityLocation ?? "";
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Text(_targetPath ?? 'フォルダ未選択', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+            ),
+            Expanded(
+              child: _targetPath == null 
+                ? Center(child: ElevatedButton(onPressed: () => _pickPath(true), child: const Text('フォルダを選択')))
+                : CustomScrollView(
+                    slivers: _groupedItems.entries.expand((entry) {
+                      final dateKey = entry.key;
+                      final items = entry.value;
 
-                    return Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
-                          child: Row(
-                            children: [
-                              Text(dateKey, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
-                              if (locationText.isNotEmpty) ...[
-                                const SizedBox(width: 12),
-                                const Icon(Icons.location_on, size: 14, color: Colors.grey),
-                                Expanded(child: Text(locationText, style: const TextStyle(color: Colors.grey, fontSize: 14), overflow: TextOverflow.ellipsis)),
-                              ]
-                            ],
+                      return [
+                        SliverToBoxAdapter(
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 24, 16, 8),
+                            child: Text(dateKey, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
                           ),
                         ),
-                        // 【改善】アスペクト比可変のグリッド（Googleフォト風 Wrapレイアウト）
-                        Padding(
+                        SliverPadding(
                           padding: const EdgeInsets.symmetric(horizontal: 8.0),
-                          child: Wrap(
-                            spacing: 4,
-                            runSpacing: 4,
-                            children: items.map((item) {
-                              final isSelected = _selectedItems.contains(item);
-                              // 高さ固定(約150px)で、幅はアスペクト比に応じて自然に広がる
-                              return GestureDetector(
-                                onTap: () => _handleItemTap(item),
-                                child: Stack(
-                                  children: [
-                                    Container(
-                                      height: 150,
-                                      // Imageがロードされるまでの一時的な幅（正方形に近い）
-                                      constraints: const BoxConstraints(minWidth: 100, maxWidth: 300), 
-                                      child: item.type == MediaType.image 
-                                        ? Image.file(item.file, fit: BoxFit.cover)
+                          sliver: SliverGrid(
+                            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                              crossAxisCount: _columns,
+                              crossAxisSpacing: 4,
+                              mainAxisSpacing: 4,
+                            ),
+                            delegate: SliverChildBuilderDelegate(
+                              (context, index) {
+                                final item = items[index];
+                                final isSelected = _selectedItems.contains(item);
+                                return GestureDetector(
+                                  onTap: () => _handleItemTap(item),
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      item.type == MediaType.image 
+                                        ? Image.file(item.file, fit: BoxFit.cover, cacheWidth: 300)
                                         : AsyncVideoThumbnail(videoPath: item.file.path),
-                                    ),
-                                    if (item.type == MediaType.video) const Positioned.fill(child: Center(child: Icon(Icons.play_circle_outline, color: Colors.white, size: 40))),
-                                    if (isSelected) Positioned.fill(child: Container(color: Colors.blue.withOpacity(0.4), child: const Center(child: Icon(Icons.check_circle, color: Colors.white, size: 40)))),
-                                    // 選択用チェックボックス（左上）
-                                    Positioned(
-                                      top: 4, left: 4,
-                                      child: GestureDetector(
-                                        onTap: () {
-                                          setState(() {
-                                            if (isSelected) _selectedItems.remove(item);
-                                            else _selectedItems.add(item);
-                                            _pivotItem = item;
-                                          });
-                                        },
-                                        child: Icon(isSelected ? Icons.check_circle : Icons.circle_outlined, color: isSelected ? Colors.blue : Colors.white70),
+                                      if (item.type == MediaType.video) const Center(child: Icon(Icons.play_circle_outline, color: Colors.white, size: 40)),
+                                      if (isSelected) Container(color: Colors.blue.withValues(alpha: 0.4), child: const Center(child: Icon(Icons.check_circle, color: Colors.white, size: 40))),
+                                      Positioned(
+                                        top: 4, left: 4,
+                                        child: GestureDetector(
+                                          onTap: () {
+                                            setState(() {
+                                              if (isSelected) {
+                                                _selectedItems.remove(item);
+                                              } else {
+                                                _selectedItems.add(item);
+                                              }
+                                              _pivotItem = item;
+                                            });
+                                          },
+                                          child: Icon(isSelected ? Icons.check_circle : Icons.circle_outlined, color: isSelected ? Colors.blue : Colors.white70),
+                                        ),
                                       ),
-                                    ),
-                                  ],
-                                ),
-                              );
-                            }).toList(),
+                                    ],
+                                  ),
+                                );
+                              },
+                              childCount: items.length,
+                            ),
                           ),
                         ),
-                      ],
-                    );
-                  },
-                ),
-          ),
-        ],
+                      ];
+                    }).toList(),
+                  ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -489,25 +631,31 @@ class _AsyncVideoThumbnailState extends State<AsyncVideoThumbnail> {
       final destFile = '${tempDir.path}${Platform.pathSeparator}$fileName.jpeg';
 
       if (File(destFile).existsSync()) {
-        if (mounted) setState(() => _thumbPath = destFile);
+        if (mounted) {
+          setState(() => _thumbPath = destFile);
+        }
         return;
       }
       final success = await _plugin.getVideoThumbnail(
         srcFile: widget.videoPath, destFile: destFile, width: 300, height: 300, format: 'jpeg', quality: 60, keepAspectRatio: true,
       );
-      if (success && mounted) setState(() => _thumbPath = destFile);
+      if (success && mounted) {
+        setState(() => _thumbPath = destFile);
+      }
     } catch (_) {}
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_thumbPath == null) return Container(color: Colors.black12, width: 150);
+    if (_thumbPath == null) {
+      return Container(color: Colors.black12);
+    }
     return Image.file(File(_thumbPath!), fit: BoxFit.cover);
   }
 }
 
 // ============================================
-// 詳細ビュー（動画プレイヤー＆情報ペイン）
+// 詳細ビュー
 // ============================================
 class DetailView extends StatefulWidget {
   final List<MediaItem> items;
@@ -522,22 +670,34 @@ class DetailView extends StatefulWidget {
 class _DetailViewState extends State<DetailView> {
   late PageController _pageController;
   late int _currentIndex;
+
+  late FocusNode _focusNode;
   
   Player? _player;
   VideoController? _videoController;
+
+  
   
   bool _showInfo = false;
-  bool _isFullscreen = false;
+  bool _isFullscreenUI = false; 
   bool _isMuted = false;
+  bool _isVideoFocused = false;
 
-  // EXIFデータ格納用
+  int _rotationQuarterTurns = 0;
+
+  double _currentVolume = 100.0;
+  bool _showVolumeOverlay = false;
+  Timer? _volumeOverlayTimer;
+
   Map<String, IfdTag> _currentExif = {};
-  double? _lat;
-  double? _lon;
 
   @override
   void initState() {
     super.initState();
+
+    _focusNode = FocusNode();      // ←追加
+    _focusNode.requestFocus();     // ←追加
+
     _currentIndex = widget.initialIndex;
     _pageController = PageController(initialPage: _currentIndex);
     _loadInfoState();
@@ -546,9 +706,7 @@ class _DetailViewState extends State<DetailView> {
 
   Future<void> _loadInfoState() async {
     final prefs = await SharedPreferences.getInstance();
-    setState(() {
-      _showInfo = prefs.getBool('showInfoPane') ?? false;
-    });
+    setState(() => _showInfo = prefs.getBool('showInfoPane') ?? false);
   }
 
   Future<void> _toggleInfo() async {
@@ -559,50 +717,43 @@ class _DetailViewState extends State<DetailView> {
 
   Future<void> _initMedia(int index) async {
     _disposePlayer();
+    setState(() {
+      _isVideoFocused = false;
+      _rotationQuarterTurns = 0; 
+    });
+    
     final item = widget.items[index];
 
-    // EXIF読み込み
     if (item.type == MediaType.image) {
       try {
         final bytes = await item.file.readAsBytes();
         final tags = await readExifFromBytes(bytes);
-        double? lat, lon;
-        if (tags.containsKey('GPS GPSLatitude')) {
-          lat = _convertExifToDouble(tags['GPS GPSLatitude']!.values.toList());
-          lon = _convertExifToDouble(tags['GPS GPSLongitude']!.values.toList());
-        }
         if (mounted) {
-          setState(() {
-            _currentExif = tags;
-            _lat = lat;
-            _lon = lon;
-          });
+          setState(() => _currentExif = tags);
         }
-      } catch (e) {
-        if (mounted) setState(() { _currentExif = {}; _lat = null; _lon = null; });
+      } catch (_) {
+        if (mounted) {
+          setState(() => _currentExif = {});
+        }
       }
     } else {
-      if (mounted) setState(() { _currentExif = {}; _lat = null; _lon = null; });
-    }
-
-    // 動画初期化
-    if (item.type == MediaType.video) {
+      if (mounted) {
+        setState(() => _currentExif = {});
+      }
       _player = Player();
       _videoController = VideoController(_player!);
       try {
         await _player!.open(Media(item.file.path));
         _player!.setPlaylistMode(PlaylistMode.loop);
-        if (_isMuted) _player!.setVolume(0);
-        if (mounted && _currentIndex == index) setState(() {});
+        _player!.setVolume(_currentVolume);
+        if (_isMuted) {
+          _player!.setVolume(0);
+        }
+        if (mounted && _currentIndex == index) {
+          setState(() {});
+        }
       } catch (_) {}
     }
-  }
-
-  double _convertExifToDouble(List<dynamic> values) {
-    if (values.length != 3) return 0.0;
-    return (values[0].numerator / values[0].denominator) + 
-           ((values[1].numerator / values[1].denominator) / 60.0) + 
-           ((values[2].numerator / values[2].denominator) / 3600.0);
   }
 
   void _disposePlayer() {
@@ -611,57 +762,160 @@ class _DetailViewState extends State<DetailView> {
     _videoController = null;
   }
 
-  Future<void> _deleteOne() async {
-    // 省略：削除の確認ダイアログ
+  Future<void> _toggleWindowFullscreen() async {
+
+  bool isFull = await windowManager.isFullScreen();
+
+  await windowManager.setFullScreen(!isFull);
+
+  if (mounted) {
+    setState(() {
+      _isFullscreenUI = !isFull;
+    });
   }
 
-  void _handleKey(KeyEvent event) {
-    if (event is! KeyDownEvent) return;
+}
+
+  Future<void> _downloadCurrent() async {
+    if (widget.downloadPath == null) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('ダウンロード先が設定されていません')));
+      return;
+    }
+    final item = widget.items[_currentIndex];
+    final fileName = item.file.path.split(Platform.pathSeparator).last;
+    final destPath = '${widget.downloadPath}${Platform.pathSeparator}$fileName';
+    try {
+      await item.file.copy(destPath);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('保存しました')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('保存に失敗しました: $e')));
+    }
+  }
+
+  Future<void> _deleteCurrent() async {
+    final item = widget.items[_currentIndex];
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('削除の確認'),
+        content: const Text('このファイルを削除しますか？\n（ディスクから完全に削除されます）'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('キャンセル')),
+          TextButton(onPressed: () => Navigator.pop(context, true), child: const Text('削除', style: TextStyle(color: Colors.red))),
+        ],
+      ),
+    );
+
+    if (confirm == true) {
+      try {
+        if (item.file.existsSync()) {
+          await item.file.delete();
+        }
+        widget.onDelete(); 
+        if (!mounted) return;
+        Navigator.pop(context); 
+      } catch (e) {
+        debugPrint('Delete error: $e');
+      }
+    }
+  }
+
+  void _setVolume(double increment) {
+    if (_player == null) {
+      return;
+    }
+    setState(() {
+      _currentVolume = (_currentVolume + increment).clamp(0.0, 100.0);
+      _player!.setVolume(_currentVolume);
+      _isMuted = _currentVolume <= 0;
+      _showVolumeOverlay = true;
+    });
+    
+    _volumeOverlayTimer?.cancel();
+    _volumeOverlayTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted) {
+        setState(() => _showVolumeOverlay = false);
+      }
+    });
+  }
+
+  void _handleKey(KeyEvent event) async {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return;
+    }
     
     final key = event.logicalKey;
-    final isShift = HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftLeft) || 
-                    HardwareKeyboard.instance.logicalKeysPressed.contains(LogicalKeyboardKey.shiftRight);
+    final currentItem = widget.items[_currentIndex];
 
-    if (key == LogicalKeyboardKey.escape) {
-      if (_isFullscreen) setState(() => _isFullscreen = false);
-      else Navigator.pop(context);
-    }
-    else if (key == LogicalKeyboardKey.keyF) {
-      setState(() => _isFullscreen = !_isFullscreen);
-    }
-    else if (key == LogicalKeyboardKey.keyD && isShift) {
-       // Shift+D ダウンロード
-    }
-    else if (key == LogicalKeyboardKey.keyR && isShift) {
-       // Shift+R 回転（実装は複雑なため割愛しますが、トリガーはここです）
-    }
+    if (event is KeyDownEvent && key == LogicalKeyboardKey.escape) {
+      bool isWindowFull = await windowManager.isFullScreen();
+      if (isWindowFull) {
+  await windowManager.setFullScreen(false);
 
-    // 動画コントロール
-    if (_player != null) {
-      if (key == LogicalKeyboardKey.space || key == LogicalKeyboardKey.keyK) {
-        _player!.state.playing ? _player!.pause() : _player!.play();
-      } else if (key == LogicalKeyboardKey.keyM) {
-        setState(() {
-          _isMuted = !_isMuted;
-          _player!.setVolume(_isMuted ? 0 : 100);
-        });
-      } else if (key == LogicalKeyboardKey.arrowRight) {
-        _player!.seek(_player!.state.position + const Duration(seconds: 5));
-      } else if (key == LogicalKeyboardKey.arrowLeft) {
-        _player!.seek(_player!.state.position - const Duration(seconds: 5));
+  if (mounted) {
+    setState(() {
+      _isFullscreenUI = false;
+    });
+  }
+
+} else {
+        Navigator.pop(context);
       }
-    } else {
-      // 画像時の左右移動
-      if (key == LogicalKeyboardKey.arrowRight && _currentIndex < widget.items.length - 1) {
+    } else if (event is KeyDownEvent && key == LogicalKeyboardKey.keyF) {
+
+  bool isFull = await windowManager.isFullScreen();
+  await windowManager.setFullScreen(!isFull);
+
+  if (mounted) {
+    setState(() {
+      _isFullscreenUI = !isFull;
+    });
+  }
+
+} else if (event is KeyDownEvent && key == LogicalKeyboardKey.keyM && _player != null) {
+  setState(() {
+    _isMuted = !_isMuted;
+    _player!.setVolume(_isMuted ? 0 : _currentVolume);
+    _showVolumeOverlay = true;
+  });
+
+  _volumeOverlayTimer?.cancel();
+  _volumeOverlayTimer = Timer(const Duration(seconds: 2), () {
+    if (mounted) {
+      setState(() => _showVolumeOverlay = false);
+    }
+  });
+    } else if (key == LogicalKeyboardKey.arrowUp && _player != null) {
+      _setVolume(5.0);
+    } else if (key == LogicalKeyboardKey.arrowDown && _player != null) {
+      _setVolume(-5.0);
+    } else if (event is KeyDownEvent && (key == LogicalKeyboardKey.space || key == LogicalKeyboardKey.keyK) && _player != null) {
+      if (_player!.state.playing) {
+        _player!.pause();
+      } else {
+        _player!.play();
+      }
+    } else if (event is KeyDownEvent && key == LogicalKeyboardKey.arrowRight) {
+      if (currentItem.type == MediaType.video && _isVideoFocused && _player != null) {
+        _player!.seek(_player!.state.position + const Duration(seconds: 5));
+      } else if (_currentIndex < widget.items.length - 1) {
         _pageController.nextPage(duration: const Duration(milliseconds: 200), curve: Curves.easeInOut);
-      } else if (key == LogicalKeyboardKey.arrowLeft && _currentIndex > 0) {
+      }
+    } else if (event is KeyDownEvent && key == LogicalKeyboardKey.arrowLeft) {
+      if (currentItem.type == MediaType.video && _isVideoFocused && _player != null) {
+        _player!.seek(_player!.state.position - const Duration(seconds: 5));
+      } else if (_currentIndex > 0) {
         _pageController.previousPage(duration: const Duration(milliseconds: 200), curve: Curves.easeInOut);
       }
     }
   }
 
   String _formatBytes(int bytes) {
-    if (bytes <= 0) return "0 B";
+    if (bytes <= 0) {
+      return "0 B";
+    }
     const suffixes = ["B", "KB", "MB", "GB", "TB"];
     var i = (log(bytes) / log(1024)).floor();
     return '${(bytes / pow(1024, i)).toStringAsFixed(1)} ${suffixes[i]}';
@@ -671,6 +925,8 @@ class _DetailViewState extends State<DetailView> {
   void dispose() {
     _disposePlayer();
     _pageController.dispose();
+    _focusNode.dispose();    
+    _volumeOverlayTimer?.cancel();
     super.dispose();
   }
 
@@ -680,57 +936,119 @@ class _DetailViewState extends State<DetailView> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
     return KeyboardListener(
-      focusNode: FocusNode()..requestFocus(),
+      focusNode: _focusNode,
       onKeyEvent: _handleKey,
       child: Scaffold(
         backgroundColor: Colors.black,
         body: Stack(
           children: [
-            // メインコンテンツ（画像・動画）
             Row(
               children: [
                 Expanded(
-                  child: PageView.builder(
-                    controller: _pageController,
-                    itemCount: widget.items.length,
-                    onPageChanged: (i) {
-                      setState(() => _currentIndex = i);
-                      _initMedia(i);
-                    },
-                    itemBuilder: (context, i) {
-                      if (widget.items[i].type == MediaType.video) {
-                        return Center(
-                          child: (i == _currentIndex && _videoController != null)
-                              ? GestureDetector(
-                                  onTap: () { if (_player != null) _player!.state.playing ? _player!.pause() : _player!.play(); },
-                                  child: Video(controller: _videoController!, controls: AdaptiveVideoControls),
-                                )
-                              : const CircularProgressIndicator(),
-                        );
-                      } else {
-                        return InteractiveViewer(child: Image.file(widget.items[i].file, fit: BoxFit.contain));
-                      }
-                    },
+                  child: GestureDetector(
+                    onTap: () => setState(() => _isVideoFocused = false),
+                    child: PageView.builder(
+                      controller: _pageController,
+                      itemCount: widget.items.length,
+                      onPageChanged: (i) {
+                        setState(() => _currentIndex = i);
+                        _initMedia(i);
+                      },
+                      itemBuilder: (context, i) {
+                        if (widget.items[i].type == MediaType.video) {
+                          return Center(
+                            child: (i == _currentIndex && _videoController != null)
+                                ? Listener(
+                                    behavior: HitTestBehavior.deferToChild,
+                                    onPointerDown: (PointerDownEvent event) {
+
+                                          // 動画UIをクリックした場合は無視
+                                          if (event.localPosition.dy > MediaQuery.of(context).size.height - 80) {
+                                            return;
+                                          }
+                                      setState(() => _isVideoFocused = true);
+
+                                      // 左クリックのみ
+                                      if ((event.buttons & kPrimaryMouseButton) != 0 && _player != null) {
+
+                                        // 再生/停止
+                                        if (_player!.state.playing) {
+                                          _player!.pause();
+                                        } else {
+                                          _player!.play();
+                                        }
+
+                                      }
+                                    },
+                                    child: MaterialDesktopVideoControlsTheme(
+                                      normal: MaterialDesktopVideoControlsThemeData(
+                                        bottomButtonBar: [
+                                          const MaterialDesktopPlayOrPauseButton(),
+                                          const MaterialDesktopVolumeButton(),
+                                          const MaterialDesktopPositionIndicator(),
+                                          const Spacer(),
+                                          // ValueKeyを追加してキャッシュを強制クリアし、アイコンを再描画させる
+                                          IconButton(
+                                            key: ValueKey('fullscreen_btn_$_isFullscreenUI'),
+                                            icon: Icon(
+                                              _isFullscreenUI ? Icons.fullscreen_exit : Icons.fullscreen,
+                                              color: Colors.white,
+                                            ),
+                                            onPressed: _toggleWindowFullscreen,
+                                          ),
+                                        ],
+                                      ),
+                                      fullscreen: MaterialDesktopVideoControlsThemeData(
+                                        bottomButtonBar: [
+                                          const MaterialDesktopPlayOrPauseButton(),
+                                          const MaterialDesktopVolumeButton(),
+                                          const MaterialDesktopPositionIndicator(),
+                                          const Spacer(),
+                                          // こちらも同様にValueKeyを設定
+                                          IconButton(
+                                            key: ValueKey('fullscreen_btn_$_isFullscreenUI'),
+                                            icon: Icon(
+                                              _isFullscreenUI ? Icons.fullscreen_exit : Icons.fullscreen,
+                                              color: Colors.white,
+                                            ),
+                                            onPressed: _toggleWindowFullscreen,
+                                          ),
+                                        ]
+                                      ),
+                                      child: Video(controller: _videoController!),
+                                    ),
+                                  )
+                                : const CircularProgressIndicator(),
+                          );
+                        } else {
+                          return InteractiveViewer(
+                            child: RotatedBox(
+                              quarterTurns: _rotationQuarterTurns,
+                              child: Image.file(widget.items[i].file, fit: BoxFit.contain, cacheWidth: 2048),
+                            ),
+                          );
+                        }
+                      },
+                    ),
                   ),
                 ),
-                // 右側：情報ペイン（トグル可能）
-                if (_showInfo && !_isFullscreen)
+                
+                if (_showInfo && !_isFullscreenUI)
                   Container(
                     width: 300,
                     color: isDark ? Colors.grey[900] : Colors.white,
                     padding: const EdgeInsets.all(20),
                     child: SingleChildScrollView(
                       child: Column(
+                        mainAxisAlignment: MainAxisAlignment.start,
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text('情報', style: TextStyle(color: isDark ? Colors.white : Colors.black, fontSize: 18, fontWeight: FontWeight.bold)),
                           const SizedBox(height: 20),
                           
-                          // 日付
                           Text(DateFormat('yyyy年MM月dd日(E) HH:mm', 'ja_JP').format(currentItem.date), style: TextStyle(color: isDark ? Colors.white70 : Colors.black87)),
                           const Divider(height: 30),
 
-                          // 機器情報
                           if (_currentExif.containsKey('Image Make') || _currentExif.containsKey('Image Model')) ...[
                             Text('${_currentExif['Image Make']?.printable ?? ''} ${_currentExif['Image Model']?.printable ?? ''}'.trim(), 
                               style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
@@ -740,36 +1058,17 @@ class _DetailViewState extends State<DetailView> {
                             const Divider(height: 30),
                           ],
 
-                          // ファイル情報
                           Text(currentItem.file.path.split(Platform.pathSeparator).last, 
                             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
                           const SizedBox(height: 4),
                           Text('${_currentExif['EXIF ExifImageWidth']?.printable ?? '-'} × ${_currentExif['EXIF ExifImageLength']?.printable ?? '-'}',
                             style: const TextStyle(color: Colors.grey, fontSize: 12)),
-                          const SizedBox(height: 12),
-                          Text('パス:\n${currentItem.file.path}', style: const TextStyle(color: Colors.grey, fontSize: 11)),
-                          const SizedBox(height: 8),
+                          const SizedBox(height: 4),
                           Text('容量: ${_formatBytes(currentItem.sizeBytes)}', style: const TextStyle(color: Colors.grey, fontSize: 12)),
+                          
                           const Divider(height: 30),
-
-                          // 位置情報
-                          if (_lat != null && _lon != null) ...[
-                            Row(
-                              children: [
-                                const Icon(Icons.location_on, color: Colors.red),
-                                const SizedBox(width: 8),
-                                Expanded(child: Text(currentItem.cityLocation ?? "位置情報あり", style: TextStyle(color: isDark ? Colors.white : Colors.black))),
-                              ],
-                            ),
-                            const SizedBox(height: 8),
-                            OutlinedButton.icon(
-                              onPressed: () => launchUrl(Uri.parse('https://maps.google.com/?q=$_lat,$_lon')),
-                              icon: const Icon(Icons.map, size: 16),
-                              label: const Text('Googleマップで開く'),
-                            )
-                          ] else ...[
-                            const Text('位置情報なし', style: TextStyle(color: Colors.grey))
-                          ]
+                          Text('パス:\n${currentItem.file.path}', style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                          const Divider(height: 30),
                         ],
                       ),
                     ),
@@ -777,37 +1076,46 @@ class _DetailViewState extends State<DetailView> {
               ],
             ),
             
-            // 右上オーバーレイアイコン群（写真に被らないよう背景グラデなどを敷くと良いですが今回はシンプルに配置）
-            if (!_isFullscreen)
+            if (currentItem.type == MediaType.video)
+              IgnorePointer(
+                child: AnimatedOpacity(
+                  opacity: _showVolumeOverlay ? 1.0 : 0.0,
+                  duration: const Duration(milliseconds: 300),
+                  // 音量％の位置を画面の中心から少し上に配置 (-0.5は上端と中心の中間)
+                  child: Align(
+                    alignment: const Alignment(0.0, -0.5),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      decoration: BoxDecoration(
+                        // 背景の透明度を30% (alpha: 0.3) に変更
+                        color: Colors.black.withValues(alpha: 0.3),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        '${_isMuted ? 0 : _currentVolume.toInt()}%',
+                        style: const TextStyle(color: Colors.white, fontSize: 32, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
+            if (!_isFullscreenUI)
               Positioned(
                 top: 10, right: _showInfo ? 310 : 10,
                 child: Row(
                   children: [
-                    IconButton(
-                      icon: Icon(_showInfo ? Icons.info : Icons.info_outline, color: Colors.white, size: 28),
-                      onPressed: _toggleInfo,
-                    ),
-                    IconButton(
-                      icon: const Icon(Icons.delete_outline, color: Colors.white, size: 28),
-                      onPressed: _deleteOne,
-                    ),
-                    PopupMenuButton(
-                      icon: const Icon(Icons.more_vert, color: Colors.white, size: 28),
-                      itemBuilder: (context) => [
-                        PopupMenuItem(child: const Text('ダウンロード (Shift+D)'), onTap: () {}),
-                        PopupMenuItem(child: const Text('左に回転 (Shift+R)'), onTap: () {}),
-                      ],
-                    ),
+                    IconButton(icon: Icon(_showInfo ? Icons.info : Icons.info_outline, color: Colors.white, size: 28), onPressed: _toggleInfo),
+                    if (currentItem.type == MediaType.image)
+                      IconButton(icon: const Icon(Icons.rotate_right, color: Colors.white, size: 28), onPressed: () => setState(() => _rotationQuarterTurns++)),
+                    IconButton(icon: const Icon(Icons.download, color: Colors.white, size: 28), onPressed: _downloadCurrent),
+                    IconButton(icon: const Icon(Icons.delete_outline, color: Colors.white, size: 28), onPressed: _deleteCurrent),
                   ],
                 ),
               ),
               
-            // 戻るボタン
-            if (!_isFullscreen)
-              Positioned(
-                top: 10, left: 10,
-                child: IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context)),
-              ),
+            if (!_isFullscreenUI)
+              Positioned(top: 10, left: 10, child: IconButton(icon: const Icon(Icons.arrow_back, color: Colors.white, size: 28), onPressed: () => Navigator.pop(context))),
           ],
         ),
       ),
