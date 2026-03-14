@@ -22,7 +22,7 @@ void main() async {
   await windowManager.ensureInitialized();
   
   WindowOptions windowOptions = const WindowOptions(
-    title: 'どこでもフォト',
+    title: 'Media Gallery',
     center: true,
   );
   windowManager.waitUntilReadyToShow(windowOptions, () async {
@@ -61,7 +61,7 @@ class _MyPhotoAppState extends State<MyPhotoApp> {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'どこでもフォト',
+      title: 'Media Gallery',
       theme: ThemeData(useMaterial3: true, brightness: Brightness.light),
       darkTheme: ThemeData(useMaterial3: true, brightness: Brightness.dark),
       themeMode: _themeMode,
