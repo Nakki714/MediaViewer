@@ -905,7 +905,10 @@ class _DetailViewState extends State<DetailView> {
       }
     } else if (event is KeyDownEvent && key == LogicalKeyboardKey.arrowLeft) {
       if (currentItem.type == MediaType.video && _isVideoFocused && _player != null) {
-        _player!.seek(_player!.state.position - const Duration(seconds: 5));
+        // 現在位置から5秒引いた時間を計算
+        final targetPosition = _player!.state.position - const Duration(seconds: 5);
+        // マイナスになれば0秒、そうでなければ計算した時間をセット
+        _player!.seek(targetPosition.isNegative ? Duration.zero : targetPosition);
       } else if (_currentIndex > 0) {
         _pageController.previousPage(duration: const Duration(milliseconds: 200), curve: Curves.easeInOut);
       }
