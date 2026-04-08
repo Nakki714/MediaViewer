@@ -32,16 +32,16 @@ void main() async {
 
   await initializeDateFormatting('ja_JP', null);
   MediaKit.ensureInitialized();
-  runApp(const MyPhotoApp());
+  runApp(const MediaViewer());
 }
 
-class MyPhotoApp extends StatefulWidget {
-  const MyPhotoApp({super.key});
+class MediaViewer extends StatefulWidget {
+  const MediaViewer({super.key});
   @override
-  State<MyPhotoApp> createState() => _MyPhotoAppState();
+  State<MediaViewer> createState() => _MediaViewerState();
 }
 
-class _MyPhotoAppState extends State<MyPhotoApp> {
+class _MediaViewerState extends State<MediaViewer> {
   ThemeMode _themeMode = ThemeMode.dark;
 
   @override
@@ -378,7 +378,7 @@ _downloadSnackBar = SnackBar(
       if (!mounted) return;
 
      _downloadStatus.value =
-    '$total件中 $completed件ダウンロード中\n残り約${remaining}秒';
+    '$total件中 $completed件ダウンロード中\n残り約$remaining秒';
 
 setState(() {});
     } catch (e) {
@@ -388,15 +388,17 @@ setState(() {});
 
   if (!mounted) return;
 
-  _downloadStatus.value = '$total件ダウンロード完了';
-  await Future.delayed(const Duration(seconds: 2));
+_downloadStatus.value = '$total件ダウンロード完了';
+await Future.delayed(const Duration(seconds: 2));
+if (!mounted) return;
 ScaffoldMessenger.of(context).hideCurrentSnackBar();
 
 await Future.delayed(const Duration(seconds: 2));
 
+if (!mounted) return;
 ScaffoldMessenger.of(context).hideCurrentSnackBar();
 
-  _clearSelection();
+_clearSelection();
 }
 
   Future<void> _deleteSelected() async {
@@ -861,7 +863,9 @@ class _DetailViewState extends State<DetailView> {
   }
 
 } else {
-        Navigator.pop(context);
+        if (mounted) {
+          Navigator.pop(context);
+        }
       }
     } else if (event is KeyDownEvent && key == LogicalKeyboardKey.keyF) {
 
