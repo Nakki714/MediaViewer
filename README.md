@@ -1,17 +1,41 @@
-# my_photo_app
+# MediaViewer
 
-A new Flutter project.
+#### **脱クラウドストレージを目指した、高速・多機能メディアビューアー**
 
-## Getting Started
+Windowsエクスプローラーの「深い階層の閲覧性の低さ」を克服するために開発された、個人用メディアサーバーに最適なメディアビューワーです。
 
-This project is a starting point for a Flutter application.
+## 主な機能
 
-A few resources to get you started if this is your first Flutter project:
+#### **1. インテリジェントなスキャンと解析**
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+・再帰的スキャン: 親フォルダを指定するだけで、サブフォルダ内の画像・動画を一括抽出。
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+・時系列ソート: メタデータ（Exif）から撮影日情報を取得し、自動的に時系列順に並べ替えます。
+
+・高速描画: アイソレートによるバックグラウンド処理とメモリキャッシュにより、大量のメディアもスムーズに表示します。
+
+#### **2. 直感的な操作**
+動画再生時は、直感的な操作を実現するショートカットを実装しています。
+| キー | 機能 |
+| :--- | :--- |
+| **F / ダブルクリック** | 全画面表示 |
+| **Space / K** | 再生・一時停止 |
+| **M** | ミュート |
+| **← / →** | 5秒シーク |
+| **↑ / ↓** | 音量5%ずつ変更 |
+
+#### **3. 高度なファイル操作と管理**
+・一括ダウンロード: 複数選択して一括保存。完了予測時間の表示機能付き。
+
+・可変グリッド: 画面サイズや好みに合わせて、グリッドの列数を動的に変更可能。
+
+・パーソナライズ: ダーク/ライトモードの切り替えや、最後に開いたフォルダの自動記憶機能を搭載。
+
+## 対応フォーマット
+| カテゴリ | 拡張子 |
+| :--- | :--- |
+| **画像** | jpg, jpeg, png, heic, webp |
+| **動画** | mp4, mov, avi, mkv |
+
+## 開発環境
+・Framework: Flutter (Dart)
