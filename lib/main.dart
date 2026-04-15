@@ -16,9 +16,17 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:fc_native_video_thumbnail/fc_native_video_thumbnail.dart';
 import 'package:exif/exif.dart';
 import 'package:window_manager/window_manager.dart';
+import 'database_helper.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart'; 
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  if (Platform.isWindows || Platform.isLinux) {
+    sqfliteFfiInit();
+    databaseFactory = databaseFactoryFfi;
+  }
+  
   await windowManager.ensureInitialized();
   
   WindowOptions windowOptions = const WindowOptions(
@@ -97,6 +105,7 @@ class PhotoGalleryPage extends StatefulWidget {
 class _PhotoGalleryPageState extends State<PhotoGalleryPage> {
   Map<String, List<MediaItem>> _groupedItems = {};
   List<MediaItem> _flatItems = [];
+  final Set<String> _knownPaths = {}; // DBから読み込んだパスを記憶する変数
 
   SnackBar? _downloadSnackBar;
 final ValueNotifier<String> _downloadStatus = ValueNotifier("");
@@ -128,19 +137,66 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
       _targetPath = prefs.getString('target_path');
       _downloadPath = prefs.getString('download_path');
     });
+    
     if (_targetPath != null) {
+      // 1. まずはDBにあるデータを一瞬で表示する！
+      await _loadFromDatabase();
+      // 2. その裏で、新しく追加されたファイルがないかスキャンする
       _scanPhotosBackground();
     }
   }
+Future<void> _loadFromDatabase() async {
+    try {
+      final dbItems = await DatabaseHelper.instance.readAllMediaItems();
+      if (dbItems.isEmpty) return; // データが空なら何もしない
 
+      List<MediaItem> loadedItems = [];
+      _knownPaths.clear(); // 記憶を一度リセット
+
+      // ↓追加：現在選んでいるフォルダのパスを小文字で用意する
+      final currentTarget = _targetPath!.toLowerCase();
+
+      for (var row in dbItems) {
+        final dbPath = row['path'].toString().toLowerCase();
+        
+        // スキャン重複を防ぐため、DBにある全パスの記憶自体は行う
+        _knownPaths.add(dbPath);
+
+        // ↓追加：DBのパスが、現在選んでいるフォルダ内のものだけ画面用リストに入れる！
+        if (dbPath.startsWith(currentTarget)) {
+          loadedItems.add(MediaItem(
+            File(row['path']),
+            DateTime.fromMillisecondsSinceEpoch(row['date_millis']),
+            row['type'] == 'image' ? MediaType.image : MediaType.video,
+            row['size_bytes'],
+          ));
+        }
+      }
+      
+      // 読み込んだデータを画面に反映
+      _updateUI(loadedItems, sort: true);
+    } catch (e) {
+      debugPrint('DB Load Error: $e');
+    }
+  }
   Future<void> _pickPath(bool isSource) async {
     String? selected = await FilePicker.platform.getDirectoryPath();
     if (selected != null) {
       final prefs = await SharedPreferences.getInstance();
       if (isSource) {
         await prefs.setString('target_path', selected);
-        setState(() => _targetPath = selected);
+        
+        // フォルダが変わったので、一度画面をまっさらにする
+        setState(() {
+          _targetPath = selected;
+          _flatItems = [];
+          _groupedItems = {};
+        });
+        
+        // 新しいフォルダのデータをDBから一瞬で読み込んでから、スキャンを走らせる
+        await _loadFromDatabase();
         _scanPhotosBackground();
+        
       } else {
         await prefs.setString('download_path', selected);
         setState(() => _downloadPath = selected);
@@ -167,15 +223,15 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
     setState(() {
       _isScanning = true;
       _selectedItems.clear();
-      _groupedItems = {};
-      _flatItems = [];
     });
 
     try {
       final receivePort = ReceivePort();
-      await Isolate.spawn(_isolateScanTask, [_targetPath!, receivePort.sendPort]);
-
-      List<MediaItem> buffer = [];
+      // _knownPaths を追加して裏方に渡す
+      await Isolate.spawn(_isolateScanTask, [_targetPath!, receivePort.sendPort, _knownPaths.toList()]);
+      
+      // 空っぽからではなく、DBで表示済みのリストを引き継ぐ
+      List<MediaItem> buffer = List.from(_flatItems);
       DateTime lastUpdate = DateTime.now();
 
       await for (final message in receivePort) {
@@ -184,6 +240,14 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
         }
         if (message is MediaItem) {
           buffer.add(message);
+
+          DatabaseHelper.instance.insertMediaItem({
+            'path': message.file.path,
+            'date_millis': message.date.millisecondsSinceEpoch,
+            'type': message.type == MediaType.image ? 'image' : 'video',
+            'size_bytes': message.sizeBytes,
+          });
+
           if (DateTime.now().difference(lastUpdate).inMilliseconds > 500) {
             _updateUI(buffer, sort: false);
             lastUpdate = DateTime.now();
@@ -264,6 +328,7 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
   static Future<void> _isolateScanTask(List<dynamic> args) async {
     String targetPath = args[0];
     SendPort sendPort = args[1];
+    Set<String> knownPaths = (args[2] as List).cast<String>().toSet();
 
     try {
       final dir = Directory(targetPath);
@@ -275,7 +340,13 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
       final stream = dir.list(recursive: true, followLinks: false);
       await for (final entity in stream) {
         if (entity is File) {
+          // ↓ 変更：判定する前に、見つけたファイルのパスを小文字に変換する
           final path = entity.path.toLowerCase();
+
+          // ↓ 変更：小文字にしたパスで「すでに知っているか」をチェックする
+          if (knownPaths.contains(path)) {
+            continue;
+          }
           MediaType? type;
           
           if (path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png') || path.endsWith('.heic') || path.endsWith('.webp')) {
