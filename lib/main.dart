@@ -2,22 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
 import 'dart:io';
-import 'dart:isolate';
+
 import 'package:intl/intl.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:path_provider/path_provider.dart';
 import 'dart:async';
 import 'dart:math';
 
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
-import 'package:fc_native_video_thumbnail/fc_native_video_thumbnail.dart';
 import 'package:exif/exif.dart';
 import 'package:window_manager/window_manager.dart';
-import 'database_helper.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart'; 
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'dart:convert'; // JSON解析用に追加
+import 'package:http/http.dart' as http; // API通信用に追加
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -87,12 +86,30 @@ class _MediaViewerState extends State<MediaViewer> {
 enum MediaType { image, video }
 
 class MediaItem {
-  final File file;
+  final String path; // FileからString(パス)に変更
   final DateTime date;
   final MediaType type;
   final int sizeBytes;
+  final String thumbnailUrl; // サムネイルのURLを追加
 
-  MediaItem(this.file, this.date, this.type, this.sizeBytes);
+  MediaItem({
+    required this.path,
+    required this.date,
+    required this.type,
+    required this.sizeBytes,
+    required this.thumbnailUrl,
+  });
+
+  // APIのJSONデータからMediaItemを作るためのファクトリメソッド
+  factory MediaItem.fromJson(Map<String, dynamic> json) {
+    return MediaItem(
+      path: json['path'],
+      date: DateTime.fromMillisecondsSinceEpoch(json['date_millis']),
+      type: json['type'] == 'image' ? MediaType.image : MediaType.video,
+      sizeBytes: json['size_bytes'],
+      thumbnailUrl: json['thumbnail_url'],
+    );
+  }
 }
 
 class PhotoGalleryPage extends StatefulWidget {
@@ -112,17 +129,57 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
   final Set<MediaItem> _selectedItems = {};
   MediaItem? _pivotItem;
   
-  bool _isScanning = false;
+  final bool _isScanning = false;
   int _columns = 8;
   String? _targetPath;
   String? _downloadPath;
+  
+  // サーバー設定
+  String _serverHost = 'localhost';
+  int _serverPort = 8000;
   
   final FocusNode _gridFocusNode = FocusNode();
 
   @override
   void initState() {
     super.initState();
+    _loadServerSettings();
     _loadSavedPaths();
+    
+    // デバッグ: アプリ起動時にAPIをテスト
+    debugPrint('🚀 PhotoGalleryPage 起動 - APIテストを実行します...');
+    _testAPI();
+  }
+
+  Future<void> _testAPI() async {
+    try {
+      final response = await http.get(Uri.parse(_buildServerUrl('/api/media')));
+      debugPrint('📡 APIテスト結果: ステータス ${response.statusCode}');
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        debugPrint('✅ APIレスポンス: ${(data as List).length} 件取得');
+      }
+    } catch (e) {
+      debugPrint('❌ APIテストエラー: $e');
+    }
+  }
+
+  String _buildServerUrl(String path) {
+    return 'http://$_serverHost:$_serverPort$path';
+  }
+
+  Future<void> _loadServerSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _serverHost = prefs.getString('server_host') ?? 'localhost';
+      _serverPort = prefs.getInt('server_port') ?? 8000;
+    });
+  }
+
+  Future<void> _saveServerSettings() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString('server_host', _serverHost);
+    await prefs.setInt('server_port', _serverPort);
   }
 
   @override
@@ -138,47 +195,176 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
       _downloadPath = prefs.getString('download_path');
     });
     
-    if (_targetPath != null) {
-      // 1. まずはDBにあるデータを一瞬で表示する！
-      await _loadFromDatabase();
-      // 2. その裏で、新しく追加されたファイルがないかスキャンする
-      _scanPhotosBackground();
+    // APIサーバーから全データを一括で取得する！
+    // サーバー側で最新情報を返すため、クライアント側でのバックグラウンドスキャンは廃止
+    await _fetchMediaFromAPI();
+  }
+// サーバーからデータを取得する関数に書き換え
+  Future<void> _fetchMediaFromAPI() async {
+    try {
+      // サーバーのAPIを叩く
+      String apiUrl = _buildServerUrl('/api/media');
+      
+      // フォルダが指定されている場合、パラメータを付ける
+      if (_targetPath != null && _targetPath!.isNotEmpty) {
+        final uri = Uri.parse(apiUrl).replace(
+          queryParameters: {'folder': _targetPath}
+        );
+        apiUrl = uri.toString();
+        debugPrint('📁 フォルダ指定: $_targetPath');
+      }
+
+      final response = await http.get(Uri.parse(apiUrl));
+
+      if (response.statusCode == 200) {
+        // 文字列(JSON)をDartのリスト形式に変換
+        final List<dynamic> data = jsonDecode(response.body);
+        
+        debugPrint('🔍 APIレスポンス: ${data.length}件取得');
+        
+        if (data.isEmpty) {
+          debugPrint('⚠️ APIが空のデータを返しました');
+          return;
+        }
+
+        List<MediaItem> loadedItems = [];
+        _knownPaths.clear();
+
+        for (var jsonItem in data) {
+          // jsonデータからMediaItemインスタンスを生成
+          final item = MediaItem.fromJson(jsonItem);
+          loadedItems.add(item);
+          _knownPaths.add(item.path.toLowerCase());
+          debugPrint('📦 読み込み: ${item.path} | サムネイル: ${item.thumbnailUrl}');
+        }
+        
+        debugPrint('✅ ${loadedItems.length}件を読み込みました');
+        
+        // 読み込んだデータを画面に反映
+        _updateUI(loadedItems, sort: true);
+      } else {
+        debugPrint('❌ API通信エラー: ステータスコード ${response.statusCode}');
+        debugPrint('📄 レスポンスボディ: ${response.body}');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('❌ サーバーに接続できません。後で再度実行してください。')),
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('❌ API取得エラー: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('❌ リモート コンピューターによりネットワーク接続が拒否されました。')),
+        );
+      }
     }
   }
-Future<void> _loadFromDatabase() async {
+// スキャン＆リフレッシュを一括処理
+  Future<void> _scanAndRefresh(String folderPath) async {
     try {
-      final dbItems = await DatabaseHelper.instance.readAllMediaItems();
-      if (dbItems.isEmpty) return; // データが空なら何もしない
+      // 1. フォルダをスキャン
+      debugPrint('🔍 フォルダをスキャンしています: $folderPath');
+      final scanResponse = await http.get(
+        Uri.parse(_buildServerUrl('/api/scan')).replace(
+          queryParameters: {'folder': folderPath}
+        ),
+      );
 
-      List<MediaItem> loadedItems = [];
-      _knownPaths.clear(); // 記憶を一度リセット
-
-      // ↓追加：現在選んでいるフォルダのパスを小文字で用意する
-      final currentTarget = _targetPath!.toLowerCase();
-
-      for (var row in dbItems) {
-        final dbPath = row['path'].toString().toLowerCase();
+      if (scanResponse.statusCode == 200) {
+        final scanResult = jsonDecode(scanResponse.body);
+        final added = scanResult['added'] ?? 0;
+        debugPrint('✅ スキャン完了: $added 件追加、${scanResult['skipped']}件スキップ');
         
-        // スキャン重複を防ぐため、DBにある全パスの記憶自体は行う
-        _knownPaths.add(dbPath);
-
-        // ↓追加：DBのパスが、現在選んでいるフォルダ内のものだけ画面用リストに入れる！
-        if (dbPath.startsWith(currentTarget)) {
-          loadedItems.add(MediaItem(
-            File(row['path']),
-            DateTime.fromMillisecondsSinceEpoch(row['date_millis']),
-            row['type'] == 'image' ? MediaType.image : MediaType.video,
-            row['size_bytes'],
-          ));
+        // 2. 新しいメディアが追加された場合、サムネイル生成
+        if (added > 0) {
+          debugPrint('🖼️ サムネイルを生成しています...');
+          final thumbResponse = await http.get(Uri.parse(_buildServerUrl('/api/generate-thumbnails')));
+          if (thumbResponse.statusCode == 200) {
+            debugPrint('✅ サムネイル生成完了');
+            await Future.delayed(const Duration(seconds: 1));
+          }
         }
       }
       
-      // 読み込んだデータを画面に反映
-      _updateUI(loadedItems, sort: true);
+      // 3. 最後にデータを再読み込み
+      await _fetchMediaFromAPI();
+      
     } catch (e) {
-      debugPrint('DB Load Error: $e');
+      debugPrint('❌ スキャン＆リフレッシュエラー: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('❌ リモート コンピューターによりネットワーク接続が拒否されました。')),
+        );
+      }
+      // エラーが発生しても、とにかくデータを読み込むようにする
+      await _fetchMediaFromAPI();
     }
   }
+// フォルダをスキャンしてサーバーのDBに登録する
+  Future<void> _showServerSettings() async {
+    String tempHost = _serverHost;
+    int tempPort = _serverPort;
+    
+    // async gapの前にNavigatorとScaffoldMessengerを取得
+    final navigator = Navigator.of(context);
+    final scaffoldMessenger = ScaffoldMessenger.of(context);
+
+    await showDialog(
+      context: context,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setState) => AlertDialog(
+          title: const Text('サーバー設定'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                decoration: const InputDecoration(labelText: 'ホスト名/IP'),
+                controller: TextEditingController(text: tempHost),
+                onChanged: (value) => tempHost = value,
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                decoration: const InputDecoration(labelText: 'ポート'),
+                controller: TextEditingController(text: tempPort.toString()),
+                keyboardType: TextInputType.number,
+                onChanged: (value) {
+                  if (value.isNotEmpty) {
+                    tempPort = int.tryParse(value) ?? 8000;
+                  }
+                },
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('キャンセル'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                setState(() {
+                  _serverHost = tempHost;
+                  _serverPort = tempPort;
+                });
+                await _saveServerSettings();
+                if (!mounted) return;
+                navigator.pop();
+                await _fetchMediaFromAPI();
+                if (!mounted) return;
+                scaffoldMessenger.showSnackBar(
+                  const SnackBar(content: Text('✅ 設定を保存しました')),
+                );
+              },
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+// フォルダをスキャンしてサーバーのDBに登録する
   Future<void> _pickPath(bool isSource) async {
     String? selected = await FilePicker.platform.getDirectoryPath();
     if (selected != null) {
@@ -186,16 +372,14 @@ Future<void> _loadFromDatabase() async {
       if (isSource) {
         await prefs.setString('target_path', selected);
         
-        // フォルダが変わったので、一度画面をまっさらにする
         setState(() {
           _targetPath = selected;
           _flatItems = [];
           _groupedItems = {};
         });
         
-        // 新しいフォルダのデータをDBから一瞬で読み込んでから、スキャンを走らせる
-        await _loadFromDatabase();
-        _scanPhotosBackground();
+        // スキャン＆リフレッシュを実行
+        await _scanAndRefresh(selected);
         
       } else {
         await prefs.setString('download_path', selected);
@@ -216,176 +400,7 @@ Future<void> _loadFromDatabase() async {
     });
   }
 
-  Future<void> _scanPhotosBackground() async {
-    if (_targetPath == null || _isScanning) {
-      return;
-    }
-    setState(() {
-      _isScanning = true;
-      _selectedItems.clear();
-    });
 
-    try {
-      final receivePort = ReceivePort();
-      // _knownPaths を追加して裏方に渡す
-      await Isolate.spawn(_isolateScanTask, [_targetPath!, receivePort.sendPort, _knownPaths.toList()]);
-      
-      // 空っぽからではなく、DBで表示済みのリストを引き継ぐ
-      List<MediaItem> buffer = List.from(_flatItems);
-      DateTime lastUpdate = DateTime.now();
-
-      await for (final message in receivePort) {
-        if (message == null) {
-          break;
-        }
-        if (message is MediaItem) {
-          buffer.add(message);
-
-          DatabaseHelper.instance.insertMediaItem({
-            'path': message.file.path,
-            'date_millis': message.date.millisecondsSinceEpoch,
-            'type': message.type == MediaType.image ? 'image' : 'video',
-            'size_bytes': message.sizeBytes,
-          });
-
-          if (DateTime.now().difference(lastUpdate).inMilliseconds > 500) {
-            _updateUI(buffer, sort: false);
-            lastUpdate = DateTime.now();
-          }
-        }
-      }
-      _updateUI(buffer, sort: true);
-    } catch (e) {
-      debugPrint('Scan Error: $e');
-    } finally {
-      if (mounted) {
-        setState(() => _isScanning = false);
-      }
-    }
-  }
-
-  static Future<DateTime?> _getVideoMediaDate(File file) async {
-    RandomAccessFile? raf;
-    try {
-      raf = await file.open(mode: FileMode.read);
-      final length = await raf.length();
-      int offset = 0;
-
-      while (offset < length) {
-        raf.setPositionSync(offset);
-        final header = raf.readSync(8);
-        if (header.length < 8) break;
-
-        int size = (header[0] << 24) | (header[1] << 16) | (header[2] << 8) | header[3];
-        final type = String.fromCharCodes(header.sublist(4, 8));
-
-        if (size == 1) {
-          final extSize = raf.readSync(8);
-          int upper = (extSize[0] << 24) | (extSize[1] << 16) | (extSize[2] << 8) | extSize[3];
-          int lower = (extSize[4] << 24) | (extSize[5] << 16) | (extSize[6] << 8) | extSize[7];
-          size = (upper * 4294967296) + lower;
-          if (type != 'moov' && type != 'mvhd') {
-            offset += size;
-            continue;
-          }
-        } else if (size < 8) {
-          break;
-        }
-
-        if (type == 'moov') {
-          offset += (size == 1) ? 16 : 8; 
-        } else if (type == 'mvhd') {
-          final mvhdData = raf.readSync(32);
-          final version = mvhdData[0];
-          int creationTime = 0;
-          
-          if (version == 0) {
-            creationTime = (mvhdData[4] << 24) | (mvhdData[5] << 16) | (mvhdData[6] << 8) | mvhdData[7];
-          } else if (version == 1) {
-            int upper = (mvhdData[4] << 24) | (mvhdData[5] << 16) | (mvhdData[6] << 8) | mvhdData[7];
-            int lower = (mvhdData[8] << 24) | (mvhdData[9] << 16) | (mvhdData[10] << 8) | mvhdData[11];
-            creationTime = (upper * 4294967296) + lower;
-          }
-
-          if (creationTime > 0) {
-            final unixEpoch = creationTime - 2082844800;
-            if (unixEpoch > 0) {
-              return DateTime.fromMillisecondsSinceEpoch(unixEpoch * 1000);
-            }
-          }
-          break;
-        } else {
-          offset += size; 
-        }
-      }
-    } catch (_) {
-    } finally {
-      raf?.closeSync();
-    }
-    return null;
-  }
-
-  static Future<void> _isolateScanTask(List<dynamic> args) async {
-    String targetPath = args[0];
-    SendPort sendPort = args[1];
-    Set<String> knownPaths = (args[2] as List).cast<String>().toSet();
-
-    try {
-      final dir = Directory(targetPath);
-      if (!dir.existsSync()) {
-        sendPort.send(null);
-        return;
-      }
-
-      final stream = dir.list(recursive: true, followLinks: false);
-      await for (final entity in stream) {
-        if (entity is File) {
-          // ↓ 変更：判定する前に、見つけたファイルのパスを小文字に変換する
-          final path = entity.path.toLowerCase();
-
-          // ↓ 変更：小文字にしたパスで「すでに知っているか」をチェックする
-          if (knownPaths.contains(path)) {
-            continue;
-          }
-          MediaType? type;
-          
-          if (path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png') || path.endsWith('.heic') || path.endsWith('.webp')) {
-            type = MediaType.image;
-          } else if (path.endsWith('.mp4') || path.endsWith('.mov') || path.endsWith('.avi') || path.endsWith('.mkv')) {
-            type = MediaType.video;
-          }
-
-          if (type != null) {
-            final stat = await entity.stat();
-            DateTime fileDate = stat.changed; 
-
-            if (type == MediaType.image) {
-              try {
-                final fileStream = entity.openRead(0, 65536);
-                final bytes = <int>[];
-                await for (final chunk in fileStream) {
-                  bytes.addAll(chunk);
-                }
-                final tags = await readExifFromBytes(bytes);
-                if (tags.containsKey('EXIF DateTimeOriginal')) {
-                  String ds = tags['EXIF DateTimeOriginal']!.printable;
-                  fileDate = DateFormat("yyyy:MM:dd HH:mm:ss").parse(ds);
-                }
-              } catch (_) {}
-            } else if (type == MediaType.video) {
-              final mediaDate = await _getVideoMediaDate(entity);
-              if (mediaDate != null) {
-                fileDate = mediaDate;
-              }
-            }
-            sendPort.send(MediaItem(entity, fileDate, type, stat.size));
-          }
-        }
-      }
-    } catch (_) {} finally {
-      sendPort.send(null);
-    }
-  }
 
   void _updateUI(List<MediaItem> items, {bool sort = true}) {
     if (sort) {
@@ -435,10 +450,10 @@ _downloadSnackBar = SnackBar(
 
     try {
 
-      final fileName = item.file.path.split(Platform.pathSeparator).last;
+      final fileName = item.path.split(Platform.pathSeparator).last;
       final destPath = '$_downloadPath${Platform.pathSeparator}$fileName';
 
-      await item.file.copy(destPath);
+      await File(item.path).copy(destPath);
 
       completed++;
 
@@ -491,15 +506,16 @@ _clearSelection();
 
     for (var item in _selectedItems) {
       try {
-        if (item.file.existsSync()) {
-          await item.file.delete();
+        if (File(item.path).existsSync()) {
+          await File(item.path).delete();
         }
       } catch (e) {
         debugPrint('Delete error: $e');
       }
     }
     _clearSelection();
-    _scanPhotosBackground(); 
+    // リフレッシュ: APIから最新データを再取得
+    await _fetchMediaFromAPI(); 
   }
 
   void _handleItemTap(MediaItem item) {
@@ -535,7 +551,7 @@ _clearSelection();
           items: _flatItems, 
           initialIndex: _flatItems.indexOf(item), 
           downloadPath: _downloadPath,
-          onDelete: () => _scanPhotosBackground(),
+          onDelete: () => _fetchMediaFromAPI(),
         )));
       }
     });
@@ -565,7 +581,7 @@ _clearSelection();
       child: Scaffold(
         appBar: AppBar(
           toolbarHeight: 50,
-          title: Text(isSelectionMode ? '${_selectedItems.length}件選択中' : 'マイフォト', style: const TextStyle(fontSize: 16)),
+          title: Text(isSelectionMode ? '${_selectedItems.length}件選択中' : 'Media Viewer', style: const TextStyle(fontSize: 16)),
           actions: [
             if (_isScanning) const Center(child: Padding(padding: EdgeInsets.all(12), child: SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2)))),
             if (isSelectionMode) ...[
@@ -574,7 +590,7 @@ _clearSelection();
               IconButton(icon: const Icon(Icons.close), onPressed: _clearSelection),
             ] else ...[
               IconButton(icon: const Icon(Icons.grid_view), onPressed: _toggleColumns),
-              IconButton(icon: const Icon(Icons.refresh), onPressed: _scanPhotosBackground),
+              IconButton(icon: const Icon(Icons.refresh), onPressed: _fetchMediaFromAPI),
             ]
           ],
         ),
@@ -588,6 +604,7 @@ _clearSelection();
                   _buildMenuButton('ファイル', [
                     PopupMenuItem(child: const Text('フォルダを開く'), onTap: () => Future(() => _pickPath(true))),
                     PopupMenuItem(child: const Text('ダウンロード先の設定'), onTap: () => Future(() => _pickPath(false))),
+                    PopupMenuItem(child: const Text('サーバー設定'), onTap: () => Future(() => _showServerSettings())),
                     PopupMenuItem(child: const Text('終了'), onTap: () => exit(0)),
                   ]),
                   _buildMenuButton('表示', [
@@ -598,7 +615,13 @@ _clearSelection();
             ),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-              child: Text(_targetPath ?? 'フォルダ未選択', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('サーバー: $_serverHost:$_serverPort', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                  Text('フォルダ: ${_targetPath ?? 'フォルダ未選択'}', style: const TextStyle(fontSize: 11, color: Colors.grey)),
+                ],
+              ),
             ),
             Expanded(
               child: _targetPath == null 
@@ -632,9 +655,38 @@ _clearSelection();
                                   child: Stack(
                                     fit: StackFit.expand,
                                     children: [
-                                      item.type == MediaType.image 
-                                        ? Image.file(item.file, fit: BoxFit.cover, cacheWidth: 300)
-                                        : AsyncVideoThumbnail(videoPath: item.file.path),
+                                      Image.network(
+                                        item.thumbnailUrl,
+                                        fit: BoxFit.cover,
+                                        loadingBuilder: (context, child, loadingProgress) {
+                                          if (loadingProgress == null) return child;
+                                          return Center(
+                                            child: CircularProgressIndicator(
+                                              value: loadingProgress.expectedTotalBytes != null
+                                                  ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
+                                                  : null,
+                                            ),
+                                          );
+                                        },
+                                        errorBuilder: (context, error, stackTrace) {
+                                          debugPrint('❌ サムネイル読み込みエラー: ${item.path}');
+                                          debugPrint('   URL: ${item.thumbnailUrl}');
+                                          debugPrint('   エラー: $error');
+                                          return Container(
+                                            color: Colors.grey[800],
+                                            child: const Center(
+                                              child: Column(
+                                                mainAxisAlignment: MainAxisAlignment.center,
+                                                children: [
+                                                  Icon(Icons.broken_image, color: Colors.grey, size: 40),
+                                                  SizedBox(height: 8),
+                                                  Text('読み込みエラー', style: TextStyle(color: Colors.grey, fontSize: 10)),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
                                       if (item.type == MediaType.video) const Center(child: Icon(Icons.play_circle_outline, color: Colors.white, size: 40)),
                                       if (isSelected) Container(color: Colors.blue.withValues(alpha: 0.4), child: const Center(child: Icon(Icons.check_circle, color: Colors.white, size: 40))),
                                       Positioned(
@@ -677,53 +729,6 @@ _clearSelection();
       child: Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8), child: Text(label, style: const TextStyle(fontSize: 13))),
       itemBuilder: (context) => items,
     );
-  }
-}
-
-class AsyncVideoThumbnail extends StatefulWidget {
-  final String videoPath;
-  const AsyncVideoThumbnail({super.key, required this.videoPath});
-  @override
-  State<AsyncVideoThumbnail> createState() => _AsyncVideoThumbnailState();
-}
-
-class _AsyncVideoThumbnailState extends State<AsyncVideoThumbnail> {
-  String? _thumbPath;
-  final _plugin = FcNativeVideoThumbnail();
-
-  @override
-  void initState() {
-    super.initState();
-    _generateThumbnail();
-  }
-
-  Future<void> _generateThumbnail() async {
-    try {
-      final tempDir = await getTemporaryDirectory();
-      final fileName = widget.videoPath.hashCode.toString();
-      final destFile = '${tempDir.path}${Platform.pathSeparator}$fileName.jpeg';
-
-      if (File(destFile).existsSync()) {
-        if (mounted) {
-          setState(() => _thumbPath = destFile);
-        }
-        return;
-      }
-      final success = await _plugin.getVideoThumbnail(
-        srcFile: widget.videoPath, destFile: destFile, width: 300, height: 300, format: 'jpeg', quality: 60, keepAspectRatio: true,
-      );
-      if (success && mounted) {
-        setState(() => _thumbPath = destFile);
-      }
-    } catch (_) {}
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    if (_thumbPath == null) {
-      return Container(color: Colors.black12);
-    }
-    return Image.file(File(_thumbPath!), fit: BoxFit.cover);
   }
 }
 
@@ -799,7 +804,7 @@ class _DetailViewState extends State<DetailView> {
 
     if (item.type == MediaType.image) {
       try {
-        final bytes = await item.file.readAsBytes();
+        final bytes = await File(item.path).readAsBytes();
         final tags = await readExifFromBytes(bytes);
         if (mounted) {
           setState(() => _currentExif = tags);
@@ -816,7 +821,7 @@ class _DetailViewState extends State<DetailView> {
       _player = Player();
       _videoController = VideoController(_player!);
       try {
-        await _player!.open(Media(item.file.path));
+        await _player!.open(Media(item.path));
         _player!.setPlaylistMode(PlaylistMode.loop);
         _player!.setVolume(_currentVolume);
         if (_isMuted) {
@@ -855,10 +860,10 @@ class _DetailViewState extends State<DetailView> {
       return;
     }
     final item = widget.items[_currentIndex];
-    final fileName = item.file.path.split(Platform.pathSeparator).last;
+    final fileName = item.path.split(Platform.pathSeparator).last;
     final destPath = '${widget.downloadPath}${Platform.pathSeparator}$fileName';
     try {
-      await item.file.copy(destPath);
+      await File(item.path).copy(destPath);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('保存しました')));
     } catch (e) {
@@ -883,8 +888,8 @@ class _DetailViewState extends State<DetailView> {
 
     if (confirm == true) {
       try {
-        if (item.file.existsSync()) {
-          await item.file.delete();
+        if (File(item.path).existsSync()) {
+          await File(item.path).delete();
         }
         widget.onDelete(); 
         if (!mounted) return;
@@ -1102,7 +1107,7 @@ class _DetailViewState extends State<DetailView> {
                           return InteractiveViewer(
                             child: RotatedBox(
                               quarterTurns: _rotationQuarterTurns,
-                              child: Image.file(widget.items[i].file, fit: BoxFit.contain, cacheWidth: 2048),
+                              child: Image.file(File(widget.items[i].path), fit: BoxFit.contain, cacheWidth: 2048),
                             ),
                           );
                         }
@@ -1136,7 +1141,7 @@ class _DetailViewState extends State<DetailView> {
                             const Divider(height: 30),
                           ],
 
-                          Text(currentItem.file.path.split(Platform.pathSeparator).last, 
+                          Text(currentItem.path.split(Platform.pathSeparator).last, 
                             style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: isDark ? Colors.white : Colors.black)),
                           const SizedBox(height: 4),
                           Text('${_currentExif['EXIF ExifImageWidth']?.printable ?? '-'} × ${_currentExif['EXIF ExifImageLength']?.printable ?? '-'}',
@@ -1145,7 +1150,7 @@ class _DetailViewState extends State<DetailView> {
                           Text('容量: ${_formatBytes(currentItem.sizeBytes)}', style: const TextStyle(color: Colors.grey, fontSize: 12)),
                           
                           const Divider(height: 30),
-                          Text('パス:\n${currentItem.file.path}', style: const TextStyle(color: Colors.grey, fontSize: 11)),
+                          Text('パス:\n${currentItem.path}', style: const TextStyle(color: Colors.grey, fontSize: 11)),
                           const Divider(height: 30),
                         ],
                       ),
