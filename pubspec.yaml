@@ -1,4 +1,4 @@
-name: my_photo_app
+name: media_viewer
 description: "A new Flutter project."
 publish_to: 'none'
 version: 1.0.0+1
@@ -9,6 +9,12 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+  http: ^1.1.0
+
+  #DataBase
+  sqflite: ^2.3.0
+  path: ^1.8.3
+  sqflite_common_ffi: ^2.4.0+2
   
   # 動画再生（Windows対応版）
   media_kit: any

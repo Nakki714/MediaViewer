@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "my_photo_app" "\0"
+            VALUE "CompanyName", "com.Nakki714.Media Viewer" "\0"
+            VALUE "FileDescription", "Media Viewer" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "my_photo_app" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
-            VALUE "OriginalFilename", "my_photo_app.exe" "\0"
-            VALUE "ProductName", "my_photo_app" "\0"
+            VALUE "InternalName", "Media Viewer" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Nakki714. All rights reserved." "\0"
+            VALUE "OriginalFilename", "Media Viewer.exe" "\0"
+            VALUE "ProductName", "Media Viewer" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END
