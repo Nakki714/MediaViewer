@@ -13,7 +13,7 @@ load_dotenv()
 default_db_path = os.path.join(Path.home(), "Documents", "media_viewer.db")
 DB_PATH = os.getenv("DB_PATH", default_db_path)
 
-# サムネイルは「ドキュメント」フォルダ内の「.media_thumbnails」という隠しフォルダに保存する
+# サムネイルは「ドキュメント」フォルダ内の「.media_thumbnails」というフォルダに保存する
 THUMBNAIL_DIR = os.path.join(Path.home(), "Documents", ".media_thumbnails")
 os.makedirs(THUMBNAIL_DIR, exist_ok=True)
 

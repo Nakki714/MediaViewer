@@ -1,5 +1,12 @@
-fastapi
-uvicorn
-python-dotenv
-pillow
-opencv-python
+# FastAPI フレームワーク
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# 環境設定
+python-dotenv>=1.0.0
+
+# 画像処理
+pillow>=10.0.0
+
+# 動画処理
+opencv-python>=4.8.0
