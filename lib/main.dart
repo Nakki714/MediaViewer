@@ -269,8 +269,18 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('🔍 フォルダをスキャンしています: $folderPath'),
-            duration: const Duration(seconds: 30),
+            content: Row(
+              children: [
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                ),
+                const SizedBox(width: 12),
+                Expanded(child: Text('フォルダをスキャンしています: $folderPath')),
+              ],
+            ),
+            duration: const Duration(days: 1), // 完了まで消えない
           ),
         );
       }
