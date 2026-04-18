@@ -1,63 +1,49 @@
 # Media Viewer
 
-Windows向けのローカルメディアビューアです。  
-写真・動画をフォルダ単位で管理し、サムネイル付きのギャラリー表示ができます。
+写真・動画をネットワーク越しに閲覧できるメディアビューアです。
+ネットワーク接続には [Tailscale](https://tailscale.com/) を使用することを想定しています。
 
 ## 機能
 
 - 画像・動画のギャラリー表示（グリッドレイアウト）
 - フォルダスキャンによるメディア自動登録
-- サムネイル生成・キャッシュ
+- サムネイル生成・キャッシュ（JPEG・HEIC・DNG・RAW対応）
 - ダークモード / ライトモード切替
 - Exif情報の表示（撮影日時・カメラ機種・F値など）
 - 動画再生（音量調整・フルスクリーン対応）
 
+## 対応拡張子
+
+| 種別 | 拡張子 |
+|------|--------|
+| 画像 | `.jpg` `.jpeg` `.png` `.gif` `.bmp` `.webp` `.heic` `.tiff` `.raw` `.dng` `.cr2` `.nef` `.arw` |
+| 動画 | `.mp4` `.mkv` `.avi` `.mov` `.flv` `.wmv` `.webm` `.m4v` `.ts` `.m2ts` `.mts` |
+
 ## 動作環境
 
-- Windows 10 / 11
-- Python 3.10 以上（サーバー動作に必要）
+- Windows 10 / 11 (64bit)
+- Tailscale
 
 ---
 
-## インストール方法（一般ユーザー向け）
+## 一般ユーザー向け
 
-### 1. リリースページからダウンロード
+[Releases](https://github.com/Nakki714/MediaViewer/releases) ページから以下の2つをダウンロードします。
 
-[Releases](https://github.com/Nakki714/MediaViewer/releases) ページから最新版の `MediaViewer_vX.X.zip` をダウンロードして解凍します。
+| ファイル | 説明 |
+|--------|------|
+| `MediaViewer_Setup.exe` | アプリのインストーラー |
+| `MediaServer.zip` | サーバー一式 |
 
-解凍後のフォルダ構成：
+### クライアント側
+`MediaViewer_Setup.exe` を実行してインストールし、設定からサーバーのIPアドレスを入力します。
 
-```
-MediaViewer/
-├── MediaViewer.exe          ← アプリ本体
-└── MediaServer/
-    ├── server.exe           ← サーバー（EXE版）
-    ├── setup.bat            ← 初回セットアップ用
-    └── start_server.bat     ← サーバー起動用
-```
-
-> **EXE版を使う場合（推奨）：** Pythonのインストールは不要です。`server.exe` を直接起動できます。
-
-### 2. 初回セットアップ
-
-1. `MediaServer` フォルダを開く
-2. `setup.bat` をダブルクリックして実行
-   - Pythonが未インストールの場合、自動でインストールを案内します
-   - 必要なライブラリが自動でインストールされます
-
-### 3. 起動手順
-
-アプリを使うたびに以下の順番で起動します：
-
-1. `MediaServer/start_server.bat` を起動（バックグラウンドで動くサーバー）
-2. `MediaViewer.exe` を起動
-
-> サーバーが起動していないとアプリにメディアが表示されません。  
-> 使い終わったら `start_server.bat` のウィンドウを閉じてサーバーを停止してください。
+### サーバー側
+`MediaServer.zip` を解凍して `server.exe` を起動します。
 
 ---
 
-## 開発者向け セットアップ
+## 開発者向け
 
 ### 必要なもの
 
@@ -65,7 +51,7 @@ MediaViewer/
 - [Python](https://www.python.org/downloads/) 3.10 以上
 - Windows 向け Flutter 開発環境（Visual Studio Build Tools）
 
-### セットアップ手順
+### セットアップ
 
 ```bash
 # リポジトリのクローン
@@ -78,34 +64,43 @@ flutter pub get
 # Pythonサーバーのセットアップ
 cd MediaServer
 pip install -r requirements.txt
-
-# .envファイルの作成（必要であれば）
-copy .env.example .env
 ```
 
 ### 起動
 
-**サーバーを起動（ターミナル1）**
+**サーバー（ターミナル1）**
 ```bash
 cd MediaServer
 python server.py
 ```
 
-**Flutterアプリを起動（ターミナル2）**
+**アプリ（ターミナル2）**
 ```bash
-cd MediaViewer
 flutter run -d windows
 ```
 
-### ビルド（配布用EXEの作成）
+### ビルド
 
+**Flutterアプリ**
 ```bash
-# Flutterアプリのビルド
 flutter build windows
+```
 
-# Pythonサーバーのexe化（MediaServerフォルダ内で実行）
+**Pythonサーバーのexe化**
+```bash
 cd MediaServer
-build_exe.bat
+pyinstaller --onefile --name make_thumbnails make_thumbnails.py
+
+pyinstaller --onefile --name server ^
+  --hidden-import uvicorn.logging ^
+  --hidden-import uvicorn.loops ^
+  --hidden-import uvicorn.loops.auto ^
+  --hidden-import uvicorn.protocols ^
+  --hidden-import uvicorn.protocols.http ^
+  --hidden-import uvicorn.protocols.http.auto ^
+  --hidden-import uvicorn.lifespan ^
+  --hidden-import uvicorn.lifespan.on ^
+  server.py
 ```
 
 ---
@@ -118,13 +113,9 @@ MediaViewer/
 │   └── main.dart              # Flutterアプリ本体
 ├── pubspec.yaml               # Flutter依存関係
 └── MediaServer/
-    ├── server.py              # FastAPIサーバー（メディアスキャン・API提供）
-    ├── make_thumbnails.py     # サムネイル生成スクリプト
-    ├── requirements.txt       # Python依存ライブラリ
-    ├── .env.example           # 環境変数設定のサンプル
-    ├── setup.bat              # 初回セットアップ用バッチ
-    ├── start_server.bat       # サーバー起動用バッチ
-    └── build_exe.bat          # 配布用exeビルド用バッチ
+    ├── server.py              # FastAPIサーバー
+    ├── make_thumbnails.py     # サムネイル生成
+    └── requirements.txt       # Python依存ライブラリ
 ```
 
 ## 技術スタック
@@ -134,7 +125,7 @@ MediaViewer/
 | UIアプリ | Flutter (Dart) |
 | バックエンドサーバー | Python / FastAPI |
 | データベース | SQLite |
-| 画像処理 | Pillow |
+| 画像処理 | Pillow / pillow-heif / rawpy |
 | 動画処理 | OpenCV |
 | 動画再生 | media_kit |
 
