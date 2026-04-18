@@ -1,41 +1,145 @@
-# MediaViewer
+# Media Viewer
 
-#### **脱クラウドストレージを目指した、高速・多機能メディアビューアー**
+Windows向けのローカルメディアビューアです。  
+写真・動画をフォルダ単位で管理し、サムネイル付きのギャラリー表示ができます。
 
-Windowsエクスプローラーの「深い階層の閲覧性の低さ」を克服するために開発された、個人用メディアサーバーに最適なメディアビューワーです。
+## 機能
 
-## 主な機能
+- 画像・動画のギャラリー表示（グリッドレイアウト）
+- フォルダスキャンによるメディア自動登録
+- サムネイル生成・キャッシュ
+- ダークモード / ライトモード切替
+- Exif情報の表示（撮影日時・カメラ機種・F値など）
+- 動画再生（音量調整・フルスクリーン対応）
 
-#### **1. インテリジェントなスキャンと解析**
+## 動作環境
 
-・再帰的スキャン: 親フォルダを指定するだけで、サブフォルダ内の画像・動画を一括抽出。
+- Windows 10 / 11
+- Python 3.10 以上（サーバー動作に必要）
 
-・時系列ソート: メタデータ（Exif）から撮影日情報を取得し、自動的に時系列順に並べ替えます。
+---
 
-・高速描画: アイソレートによるバックグラウンド処理とメモリキャッシュにより、大量のメディアもスムーズに表示します。
+## インストール方法（一般ユーザー向け）
 
-#### **2. 直感的な操作**
-動画再生時は、直感的な操作を実現するショートカットを実装しています。
-| キー | 機能 |
-| :--- | :--- |
-| **F / ダブルクリック** | 全画面表示 |
-| **Space / K** | 再生・一時停止 |
-| **M** | ミュート |
-| **← / →** | 5秒シーク |
-| **↑ / ↓** | 音量5%ずつ変更 |
+### 1. リリースページからダウンロード
 
-#### **3. 高度なファイル操作と管理**
-・一括ダウンロード: 複数選択して一括保存。完了予測時間の表示機能付き。
+[Releases](https://github.com/Nakki714/MediaViewer/releases) ページから最新版の `MediaViewer_vX.X.zip` をダウンロードして解凍します。
 
-・可変グリッド: 画面サイズや好みに合わせて、グリッドの列数を動的に変更可能。
+解凍後のフォルダ構成：
 
-・パーソナライズ: ダーク/ライトモードの切り替えや、最後に開いたフォルダの自動記憶機能を搭載。
+```
+MediaViewer/
+├── MediaViewer.exe          ← アプリ本体
+└── MediaServer/
+    ├── server.exe           ← サーバー（EXE版）
+    ├── setup.bat            ← 初回セットアップ用
+    └── start_server.bat     ← サーバー起動用
+```
 
-## 対応フォーマット
-| カテゴリ | 拡張子 |
-| :--- | :--- |
-| **画像** | jpg, jpeg, png, heic, webp |
-| **動画** | mp4, mov, avi, mkv |
+> **EXE版を使う場合（推奨）：** Pythonのインストールは不要です。`server.exe` を直接起動できます。
 
-## 開発環境
-・Framework: Flutter (Dart)
+### 2. 初回セットアップ
+
+1. `MediaServer` フォルダを開く
+2. `setup.bat` をダブルクリックして実行
+   - Pythonが未インストールの場合、自動でインストールを案内します
+   - 必要なライブラリが自動でインストールされます
+
+### 3. 起動手順
+
+アプリを使うたびに以下の順番で起動します：
+
+1. `MediaServer/start_server.bat` を起動（バックグラウンドで動くサーバー）
+2. `MediaViewer.exe` を起動
+
+> サーバーが起動していないとアプリにメディアが表示されません。  
+> 使い終わったら `start_server.bat` のウィンドウを閉じてサーバーを停止してください。
+
+---
+
+## 開発者向け セットアップ
+
+### 必要なもの
+
+- [Flutter SDK](https://docs.flutter.dev/get-started/install/windows) 3.x 以上
+- [Python](https://www.python.org/downloads/) 3.10 以上
+- Windows 向け Flutter 開発環境（Visual Studio Build Tools）
+
+### セットアップ手順
+
+```bash
+# リポジトリのクローン
+git clone https://github.com/Nakki714/MediaViewer.git
+cd MediaViewer
+
+# Flutter依存関係のインストール
+flutter pub get
+
+# Pythonサーバーのセットアップ
+cd MediaServer
+pip install -r requirements.txt
+
+# .envファイルの作成（必要であれば）
+copy .env.example .env
+```
+
+### 起動
+
+**サーバーを起動（ターミナル1）**
+```bash
+cd MediaServer
+python server.py
+```
+
+**Flutterアプリを起動（ターミナル2）**
+```bash
+cd MediaViewer
+flutter run -d windows
+```
+
+### ビルド（配布用EXEの作成）
+
+```bash
+# Flutterアプリのビルド
+flutter build windows
+
+# Pythonサーバーのexe化（MediaServerフォルダ内で実行）
+cd MediaServer
+build_exe.bat
+```
+
+---
+
+## フォルダ構成
+
+```
+MediaViewer/
+├── lib/
+│   └── main.dart              # Flutterアプリ本体
+├── pubspec.yaml               # Flutter依存関係
+└── MediaServer/
+    ├── server.py              # FastAPIサーバー（メディアスキャン・API提供）
+    ├── make_thumbnails.py     # サムネイル生成スクリプト
+    ├── requirements.txt       # Python依存ライブラリ
+    ├── .env.example           # 環境変数設定のサンプル
+    ├── setup.bat              # 初回セットアップ用バッチ
+    ├── start_server.bat       # サーバー起動用バッチ
+    └── build_exe.bat          # 配布用exeビルド用バッチ
+```
+
+## 技術スタック
+
+| 役割 | 技術 |
+|------|------|
+| UIアプリ | Flutter (Dart) |
+| バックエンドサーバー | Python / FastAPI |
+| データベース | SQLite |
+| 画像処理 | Pillow |
+| 動画処理 | OpenCV |
+| 動画再生 | media_kit |
+
+---
+
+## ライセンス
+
+MIT License
