@@ -1,0 +1,185 @@
+import os
+from pathlib import Path
+from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from dotenv import load_dotenv
+import sqlite3
+import hashlib
+import time
+
+load_dotenv()
+app = FastAPI()
+
+default_db_path = os.path.join(Path.home(), "Documents", "media_viewer.db")
+DB_PATH = os.getenv("DB_PATH", default_db_path)
+
+# サムネイル保存先
+THUMBNAIL_DIR = os.path.join(Path.home(), "Documents", ".media_thumbnails")
+
+# ---------------------------------------------------------
+# 【新機能】サムネイルフォルダをWeb公開する
+# これにより http://localhost:8000/thumbs/ファイル名.jpg で画像が見れるようになります
+# ---------------------------------------------------------
+if os.path.exists(THUMBNAIL_DIR):
+    app.mount("/thumbs", StaticFiles(directory=THUMBNAIL_DIR), name="thumbs")
+
+# サポートされるメディア形式
+SUPPORTED_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.heic', '.raw', '.tiff'}
+SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.m4v', '.ts', '.m2ts', '.mts'}
+
+@app.get("/api/media")
+def get_all_media(folder: str = None):
+    """Flutterアプリに全データとサムネイルのURLを返す
+    
+    Args:
+        folder: フィルタリング対象のフォルダパス（指定時はそのフォルダ配下のみを返す）
+    """
+    if not os.path.exists(DB_PATH):
+        return {"error": "DB not found"}
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row # 列名で取得できるようにする
+        cursor = conn.cursor()
+        
+        # 最初にDBから全メディアを取得
+        cursor.execute("SELECT * FROM media_items ORDER BY date_millis DESC")
+        all_rows = cursor.fetchall()
+        
+        # 存在しないファイルを検出して削除
+        deleted_count = 0
+        rows_to_remove = []
+        for row in all_rows:
+            if not os.path.exists(row['path']):
+                # ファイルが存在しないので、DBから削除
+                cursor.execute("DELETE FROM media_items WHERE path = ?", (row['path'],))
+                deleted_count += 1
+                rows_to_remove.append(row)
+        
+        if deleted_count > 0:
+            conn.commit()
+            print(f"[クリーンアップ] {deleted_count}件の削除されたファイルをDBから削除しました")
+        
+        # 存在するファイルのみをメモリに保持
+        valid_rows = [row for row in all_rows if row not in rows_to_remove]
+        
+        # フォルダ指定がある場合、さらにフィルタリング
+        if folder:
+            folder_normalized = os.path.normpath(folder)
+            if not folder_normalized.endswith(os.sep):
+                folder_normalized += os.sep
+            valid_rows = [
+                row for row in valid_rows 
+                if row['path'].lower().startswith(folder_normalized.lower())
+            ]
+        
+        conn.close()
+        
+        results = []
+        for row in valid_rows:
+            item = dict(row)
+            # 修正：ここも hashlib を使う
+            file_hash = hashlib.md5(item['path'].lower().encode('utf-8')).hexdigest()
+            thumb_name = file_hash + ".jpg"
+            item['thumbnail_url'] = f"http://localhost:8000/thumbs/{thumb_name}"
+            results.append(item)
+            
+        return results
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/scan")
+def scan_folder(folder: str):
+    """指定されたフォルダをスキャンしてDBに登録する"""
+    if not os.path.exists(folder):
+        return {"error": f"Folder not found: {folder}"}
+    
+    if not os.path.isdir(folder):
+        return {"error": f"Not a directory: {folder}"}
+    
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        added_count = 0
+        skipped_count = 0
+        
+        # フォルダ内を再帰的にスキャン
+        for root, dirs, files in os.walk(folder):
+            for file in files:
+                file_path = os.path.join(root, file)
+                ext = os.path.splitext(file)[1].lower()
+                
+                # ファイル種別を判定
+                if ext in SUPPORTED_IMAGE_EXTENSIONS:
+                    media_type = 'image'
+                elif ext in SUPPORTED_VIDEO_EXTENSIONS:
+                    media_type = 'video'
+                else:
+                    continue  # サポートされていない拡張子はスキップ
+                
+                try:
+                    file_stat = os.stat(file_path)
+                    size_bytes = file_stat.st_size
+                    date_millis = int(file_stat.st_mtime * 1000)
+                    
+                    # DBに挿入（既存ならスキップ）
+                    cursor.execute(
+                        """INSERT OR IGNORE INTO media_items 
+                           (path, date_millis, type, size_bytes) 
+                           VALUES (?, ?, ?, ?)""",
+                        (file_path, date_millis, media_type, size_bytes)
+                    )
+                    
+                    # 実際に挿入されたかを確認
+                    if cursor.rowcount > 0:
+                        added_count += 1
+                    else:
+                        skipped_count += 1
+                        
+                except Exception as e:
+                    print(f"Error processing file {file_path}: {e}")
+                    skipped_count += 1
+        
+        conn.commit()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "added": added_count,
+            "skipped": skipped_count,
+            "total": added_count + skipped_count,
+            "message": f"フォルダをスキャンして{added_count}件の新規メディアを追加しました。サムネイルを生成するには /api/generate-thumbnails を実行してください。"
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/generate-thumbnails")
+def generate_thumbnails():
+    """DB内のメディアのサムネイルを生成する"""
+    import subprocess
+    try:
+        # make_thumbnails.py のパスを構築
+        script_path = os.path.join(os.path.dirname(__file__), 'make_thumbnails.py')
+        
+        if not os.path.exists(script_path):
+            return {"error": f"make_thumbnails.py not found at {script_path}"}
+        
+        # make_thumbnails.py を実行
+        result = subprocess.run([
+            'python', script_path
+        ], capture_output=True, text=True, timeout=300)  # 5分のタイムアウト
+        
+        return {
+            "status": "success",
+            "message": "サムネイル生成を開始しました",
+            "stdout": result.stdout,
+            "stderr": result.stderr
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
