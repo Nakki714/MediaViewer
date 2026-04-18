@@ -46,3 +46,6 @@ app.*.map.json
 .env
 MediaViewer_Setup.iss
 Output/MediaViewer_Setup.exe
+linux/flutter/generated_plugins.cmake
+macos/Flutter/GeneratedPluginRegistrant.swift
+windows/flutter/generated_plugins.cmake
