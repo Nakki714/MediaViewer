@@ -16,8 +16,8 @@
 
 | 種別 | 拡張子 |
 |------|--------|
-| 画像 | `.jpg` `.jpeg` `.png` `.gif` `.bmp` `.webp` `.heic` `.tiff` `.raw` `.dng` `.cr2` `.nef` `.arw` |
-| 動画 | `.mp4` `.mkv` `.avi` `.mov` `.flv` `.wmv` `.webm` `.m4v` `.ts` `.m2ts` `.mts` |
+| 画像 | `.jpg` `.jpeg` `.png` `.gif` `.bmp` `.webp` `.heic` `.tiff` `.dng` |
+| 動画 | `.mp4` `.mkv` `.avi` `.mov` `.flv` `.wmv` `.webm` |
 
 ## 動作環境
 
