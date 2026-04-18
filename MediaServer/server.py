@@ -1,35 +1,60 @@
 import os
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from dotenv import load_dotenv
 import sqlite3
 import hashlib
-import time
+import socket
 
 load_dotenv()
 app = FastAPI()
 
+# サーバー自身のIPを取得
+def get_server_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "localhost"
+
+SERVER_IP = get_server_ip()
+
 default_db_path = os.path.join(Path.home(), "Documents", "media_viewer.db")
 DB_PATH = os.getenv("DB_PATH", default_db_path)
 
-# サムネイル保存先
-THUMBNAIL_DIR = os.path.join(Path.home(), "Documents", ".media_thumbnails")
+# 起動時にDBとテーブルを自動作成
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS media_items (
+            path TEXT PRIMARY KEY,
+            date_millis INTEGER NOT NULL,
+            type TEXT NOT NULL,
+            size_bytes INTEGER NOT NULL
+        )
+    ''')
+    conn.commit()
+    conn.close()
 
-# ---------------------------------------------------------
-# 【新機能】サムネイルフォルダをWeb公開する
-# これにより http://localhost:8000/thumbs/ファイル名.jpg で画像が見れるようになります
-# ---------------------------------------------------------
-if os.path.exists(THUMBNAIL_DIR):
-    app.mount("/thumbs", StaticFiles(directory=THUMBNAIL_DIR), name="thumbs")
+init_db()
+
+# サムネイル保存先（起動時に自動作成）
+THUMBNAIL_DIR = os.path.join(Path.home(), "Documents", ".media_thumbnails")
+os.makedirs(THUMBNAIL_DIR, exist_ok=True)
+app.mount("/thumbs", StaticFiles(directory=THUMBNAIL_DIR), name="thumbs")
 
 # サポートされるメディア形式
 SUPPORTED_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.heic', '.raw', '.tiff'}
 SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.m4v', '.ts', '.m2ts', '.mts'}
 
 @app.get("/api/media")
-def get_all_media(folder: str = None):
+def get_all_media(request: Request, folder: str = None):
     """Flutterアプリに全データとサムネイルのURLを返す
     
     Args:
@@ -82,7 +107,7 @@ def get_all_media(folder: str = None):
             # 修正：ここも hashlib を使う
             file_hash = hashlib.md5(item['path'].lower().encode('utf-8')).hexdigest()
             thumb_name = file_hash + ".jpg"
-            item['thumbnail_url'] = f"http://localhost:8000/thumbs/{thumb_name}"
+            item['thumbnail_url'] = f"http://{SERVER_IP}:8000/thumbs/{thumb_name}"
             results.append(item)
             
         return results
@@ -158,24 +183,12 @@ def scan_folder(folder: str):
 @app.get("/api/generate-thumbnails")
 def generate_thumbnails():
     """DB内のメディアのサムネイルを生成する"""
-    import subprocess
     try:
-        # make_thumbnails.py のパスを構築
-        script_path = os.path.join(os.path.dirname(__file__), 'make_thumbnails.py')
-        
-        if not os.path.exists(script_path):
-            return {"error": f"make_thumbnails.py not found at {script_path}"}
-        
-        # make_thumbnails.py を実行
-        result = subprocess.run([
-            'python', script_path
-        ], capture_output=True, text=True, timeout=300)  # 5分のタイムアウト
-        
+        import make_thumbnails
+        make_thumbnails.main()
         return {
             "status": "success",
-            "message": "サムネイル生成を開始しました",
-            "stdout": result.stdout,
-            "stderr": result.stderr
+            "message": "サムネイル生成が完了しました",
         }
     except Exception as e:
         return {"error": str(e)}
