@@ -2,9 +2,14 @@ import os
 import sqlite3
 from pathlib import Path
 from dotenv import load_dotenv
-from PIL import Image
+from PIL import Image, ImageOps
+from pillow_heif import register_heif_opener
+import rawpy
 import cv2
 import hashlib
+
+# HEICサポートを有効化
+register_heif_opener()
 
 # .envを読み込む
 load_dotenv()
@@ -20,11 +25,39 @@ os.makedirs(THUMBNAIL_DIR, exist_ok=True)
 # サムネイルの最大サイズ
 THUMB_SIZE = (300, 300)
 
+def generate_raw_thumbnail(original_path, dest_path):
+    """RAW画像のサムネイルを作る"""
+    try:
+        with rawpy.imread(original_path) as raw:
+            rgb = raw.postprocess()
+        img = Image.fromarray(rgb)
+
+        # Exifの回転情報を取得して補正
+        try:
+            exif = img.getexif()
+            orientation = exif.get(0x0112)  # Orientationタグ
+            rotation_map = {3: 180, 6: 270, 8: 90}
+            if orientation in rotation_map:
+                img = img.rotate(rotation_map[orientation], expand=True)
+        except Exception:
+            pass
+
+        img.thumbnail(THUMB_SIZE)
+        img.save(dest_path, "JPEG", quality=70)
+        return True
+    except Exception as e:
+        print(f"RAWエラー ({original_path}): {e}")
+        return False
+
 def generate_image_thumbnail(original_path, dest_path):
     """画像のサムネイルを作る"""
+    ext = os.path.splitext(original_path)[1].lower()
+    if ext in ('.raw', '.dng', '.cr2', '.nef', '.arw'):
+        return generate_raw_thumbnail(original_path, dest_path)
     try:
         with Image.open(original_path) as img:
-            # 画像の向き（Exif）を修正してからリサイズ
+            # EXIF回転情報を自動適用
+            img = ImageOps.exif_transpose(img)
             img.thumbnail(THUMB_SIZE)
             # RGBモードに変換（HEICやPNGの透明背景対策）
             if img.mode in ("RGBA", "P"):

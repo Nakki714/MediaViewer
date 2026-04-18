@@ -7,6 +7,8 @@ python-dotenv>=1.0.0
 
 # 画像処理
 pillow>=10.0.0
+pillow-heif>=0.13.0
+rawpy>=0.18.0
 
 # 動画処理
 opencv-python>=4.8.0

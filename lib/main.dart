@@ -86,11 +86,12 @@ class _MediaViewerState extends State<MediaViewer> {
 enum MediaType { image, video }
 
 class MediaItem {
-  final String path; // FileからString(パス)に変更
+  final String path;
   final DateTime date;
   final MediaType type;
   final int sizeBytes;
-  final String thumbnailUrl; // サムネイルのURLを追加
+  final String thumbnailUrl;
+  final int orientation; // EXIFの回転情報（quarterTurns）
 
   MediaItem({
     required this.path,
@@ -98,9 +99,9 @@ class MediaItem {
     required this.type,
     required this.sizeBytes,
     required this.thumbnailUrl,
+    this.orientation = 0,
   });
 
-  // APIのJSONデータからMediaItemを作るためのファクトリメソッド
   factory MediaItem.fromJson(Map<String, dynamic> json) {
     return MediaItem(
       path: json['path'],
@@ -108,6 +109,7 @@ class MediaItem {
       type: json['type'] == 'image' ? MediaType.image : MediaType.video,
       sizeBytes: json['size_bytes'],
       thumbnailUrl: json['thumbnail_url'],
+      orientation: json['orientation'] ?? 0,
     );
   }
 }
@@ -263,7 +265,17 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
 // スキャン＆リフレッシュを一括処理
   Future<void> _scanAndRefresh(String folderPath) async {
     try {
-      // 1. フォルダをスキャン
+      // 1. スキャン開始のSnackBar
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('🔍 フォルダをスキャンしています: $folderPath'),
+            duration: const Duration(seconds: 30),
+          ),
+        );
+      }
+
+      // 2. フォルダをスキャン
       debugPrint('🔍 フォルダをスキャンしています: $folderPath');
       final scanResponse = await http.get(
         Uri.parse(_buildServerUrl('/api/scan')).replace(
@@ -276,7 +288,7 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
         final added = scanResult['added'] ?? 0;
         debugPrint('✅ スキャン完了: $added 件追加、${scanResult['skipped']}件スキップ');
         
-        // 2. 新しいメディアが追加された場合、サムネイル生成
+        // 3. 新しいメディアが追加された場合、サムネイル生成
         if (added > 0) {
           debugPrint('🖼️ サムネイルを生成しています...');
           final thumbResponse = await http.get(Uri.parse(_buildServerUrl('/api/generate-thumbnails')));
@@ -287,8 +299,12 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
         }
       }
       
-      // 3. 最後にデータを再読み込み
+      // 4. 最後にデータを再読み込み
       await _fetchMediaFromAPI();
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+      }
       
     } catch (e) {
       debugPrint('❌ スキャン＆リフレッシュエラー: $e');
@@ -590,7 +606,11 @@ _clearSelection();
               IconButton(icon: const Icon(Icons.close), onPressed: _clearSelection),
             ] else ...[
               IconButton(icon: const Icon(Icons.grid_view), onPressed: _toggleColumns),
-              IconButton(icon: const Icon(Icons.refresh), onPressed: _fetchMediaFromAPI),
+              IconButton(icon: const Icon(Icons.refresh), onPressed: () {
+                if (_targetPath != null && _targetPath!.isNotEmpty) {
+                  _scanAndRefresh(_targetPath!);
+                }
+              }),
             ]
           ],
         ),
@@ -795,12 +815,11 @@ class _DetailViewState extends State<DetailView> {
 
   Future<void> _initMedia(int index) async {
     _disposePlayer();
+    final item = widget.items[index];
     setState(() {
       _isVideoFocused = false;
-      _rotationQuarterTurns = 0; 
+      _rotationQuarterTurns = item.orientation; // DBから取得済みの回転情報を即時適用
     });
-    
-    final item = widget.items[index];
 
     if (item.type == MediaType.image) {
       try {

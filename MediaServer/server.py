@@ -36,9 +36,15 @@ def init_db():
             path TEXT PRIMARY KEY,
             date_millis INTEGER NOT NULL,
             type TEXT NOT NULL,
-            size_bytes INTEGER NOT NULL
+            size_bytes INTEGER NOT NULL,
+            orientation INTEGER NOT NULL DEFAULT 0
         )
     ''')
+    # 既存DBへのマイグレーション（orientation列がない場合に追加）
+    try:
+        cursor.execute('ALTER TABLE media_items ADD COLUMN orientation INTEGER NOT NULL DEFAULT 0')
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
@@ -49,8 +55,22 @@ THUMBNAIL_DIR = os.path.join(Path.home(), "Documents", ".media_thumbnails")
 os.makedirs(THUMBNAIL_DIR, exist_ok=True)
 app.mount("/thumbs", StaticFiles(directory=THUMBNAIL_DIR), name="thumbs")
 
-# サポートされるメディア形式
-SUPPORTED_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.heic', '.raw', '.tiff'}
+RAW_EXTENSIONS = {'.dng', '.raw', '.cr2', '.nef', '.arw'}
+
+def get_orientation(file_path: str) -> int:
+    """DNGなどのRAWファイルからEXIF回転情報をquarterTurns形式で取得する"""
+    ext = os.path.splitext(file_path)[1].lower()
+    if ext not in RAW_EXTENSIONS:
+        return 0
+    try:
+        from PIL import Image
+        with Image.open(file_path) as img:
+            exif = img.getexif()
+            orientation = exif.get(0x0112, 1)
+            return {1: 0, 3: 2, 6: 1, 8: 3}.get(orientation, 0)
+    except Exception:
+        return 0
+SUPPORTED_IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.heic', '.raw', '.tiff', '.dng', '.cr2', '.nef', '.arw'}
 SUPPORTED_VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.m4v', '.ts', '.m2ts', '.mts'}
 
 @app.get("/api/media")
@@ -148,13 +168,14 @@ def scan_folder(folder: str):
                     file_stat = os.stat(file_path)
                     size_bytes = file_stat.st_size
                     date_millis = int(file_stat.st_mtime * 1000)
+                    orientation = get_orientation(file_path)
                     
                     # DBに挿入（既存ならスキップ）
                     cursor.execute(
                         """INSERT OR IGNORE INTO media_items 
-                           (path, date_millis, type, size_bytes) 
-                           VALUES (?, ?, ?, ?)""",
-                        (file_path, date_millis, media_type, size_bytes)
+                           (path, date_millis, type, size_bytes, orientation) 
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (file_path, date_millis, media_type, size_bytes, orientation)
                     )
                     
                     # 実際に挿入されたかを確認
