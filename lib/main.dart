@@ -249,7 +249,7 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
         debugPrint('📄 レスポンスボディ: ${response.body}');
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('❌ サーバーに接続できません。後で再度実行してください。')),
+            const SnackBar(content: Text('❌ サーバーエラーが発生しました。server.exe が起動しているか確認してください。')),
           );
         }
       }
@@ -257,7 +257,10 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
       debugPrint('❌ API取得エラー: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('❌ リモート コンピューターによりネットワーク接続が拒否されました。')),
+          const SnackBar(
+            content: Text('❌ サーバーに接続できません。server.exe が起動しているか、サーバーのIPアドレスが正しいか確認してください。'),
+            duration: Duration(seconds: 5),
+          ),
         );
       }
     }
@@ -319,8 +322,12 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
     } catch (e) {
       debugPrint('❌ スキャン＆リフレッシュエラー: $e');
       if (mounted) {
+        ScaffoldMessenger.of(context).hideCurrentSnackBar();
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('❌ リモート コンピューターによりネットワーク接続が拒否されました。')),
+          const SnackBar(
+            content: Text('❌ サーバーに接続できません。server.exe が起動しているか、サーバーのIPアドレスが正しいか確認してください。'),
+            duration: Duration(seconds: 5),
+          ),
         );
       }
       // エラーが発生しても、とにかくデータを読み込むようにする
