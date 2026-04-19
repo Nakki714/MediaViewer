@@ -87,7 +87,7 @@ def generate_video_thumbnail(original_path, dest_path):
         print(f"動画エラー ({original_path}): {e}")
         return False
 
-def main():
+def main(progress_callback=None):
     if not os.path.exists(DB_PATH):
         print(f"エラー: DBが見つかりません -> {DB_PATH}")
         return
@@ -116,9 +116,13 @@ def main():
         # 既にサムネイルが存在するか、元のファイルが消えていたらスキップ
         if os.path.exists(dest_path):
             skipped += 1
+            if progress_callback:
+                progress_callback(i + 1, total, created, skipped)
             continue
         if not os.path.exists(original_path):
             skipped += 1
+            if progress_callback:
+                progress_callback(i + 1, total, created, skipped)
             continue
 
         # サムネイル生成
@@ -129,6 +133,9 @@ def main():
 
         if success:
             created += 1
+
+        if progress_callback:
+            progress_callback(i + 1, total, created, skipped)
 
         # 進行状況を表示（100件ごと）
         if (i + 1) % 100 == 0:

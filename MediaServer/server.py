@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import sqlite3
 import hashlib
 import socket
+import threading
 
 load_dotenv()
 app = FastAPI()
@@ -201,18 +202,37 @@ def scan_folder(folder: str):
     except Exception as e:
         return {"error": str(e)}
 
+@app.get("/api/thumbnail-progress")
+def get_thumbnail_progress():
+    """サムネイル生成の進捗を返す"""
+    return _thumbnail_progress
+
+_thumbnail_progress = {"total": 0, "current": 0, "created": 0, "running": False}
+
 @app.get("/api/generate-thumbnails")
 def generate_thumbnails():
-    """DB内のメディアのサムネイルを生成する"""
-    try:
-        import make_thumbnails
-        make_thumbnails.main()
-        return {
-            "status": "success",
-            "message": "サムネイル生成が完了しました",
-        }
-    except Exception as e:
-        return {"error": str(e)}
+    """DB内のメディアのサムネイルを生成する（バックグラウンドで実行）"""
+    if _thumbnail_progress["running"]:
+        return {"status": "already_running"}
+
+    def update_progress(current, total, created, skipped):
+        _thumbnail_progress.update({
+            "current": current,
+            "total": total,
+            "created": created,
+        })
+
+    def run():
+        _thumbnail_progress.update({"running": True, "current": 0, "total": 0, "created": 0})
+        try:
+            import make_thumbnails
+            make_thumbnails.main(progress_callback=update_progress)
+        finally:
+            _thumbnail_progress["running"] = False
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    return {"status": "started", "message": "サムネイル生成を開始しました"}
 
 if __name__ == "__main__":
     import uvicorn

@@ -135,6 +135,8 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
   int _columns = 8;
   String? _targetPath;
   String? _downloadPath;
+
+  Timer? _progressTimer;
   
   // サーバー設定
   String _serverHost = 'localhost';
@@ -187,6 +189,7 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
   @override
   void dispose() {
     _gridFocusNode.dispose();
+    _progressTimer?.cancel();
     super.dispose();
   }
 
@@ -304,10 +307,65 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
         // 3. 新しいメディアが追加された場合、サムネイル生成
         if (added > 0) {
           debugPrint('🖼️ サムネイルを生成しています...');
-          final thumbResponse = await http.get(Uri.parse(_buildServerUrl('/api/generate-thumbnails')));
-          if (thumbResponse.statusCode == 200) {
-            debugPrint('✅ サムネイル生成完了');
-            await Future.delayed(const Duration(seconds: 1));
+          await http.get(Uri.parse(_buildServerUrl('/api/generate-thumbnails')));
+
+          // スキャンのSnackBarを消してからサムネイル進捗を表示
+          if (mounted) ScaffoldMessenger.of(context).clearSnackBars();
+
+          // 進捗表示用ValueNotifier
+          final progressText = ValueNotifier<String>('サムネイルを生成しています...');
+
+          // SnackBarを1回だけ表示
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: ValueListenableBuilder<String>(
+                  valueListenable: progressText,
+                  builder: (context, text, _) => Row(
+                    children: [
+                      const SizedBox(width: 16, height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+                      const SizedBox(width: 12),
+                      Text(text),
+                    ],
+                  ),
+                ),
+                duration: const Duration(days: 1),
+              ),
+            );
+          }
+
+          // 進捗ポーリング開始
+          final completer = Completer<void>();
+          _progressTimer?.cancel();
+          _progressTimer = Timer.periodic(const Duration(seconds: 1), (timer) async {
+            try {
+              final res = await http.get(Uri.parse(_buildServerUrl('/api/thumbnail-progress')));
+              if (res.statusCode == 200) {
+                final data = jsonDecode(res.body);
+                final current = data['current'] ?? 0;
+                final total = data['total'] ?? 0;
+                final running = data['running'] ?? false;
+                if (total > 0 && !completer.isCompleted) {
+                  progressText.value = 'サムネイルを生成しています: $current / $total 件完了';
+                }
+                if (!running && !completer.isCompleted) {
+                  timer.cancel();
+                  _progressTimer = null;
+                  completer.complete();
+                }
+              }
+            } catch (_) {
+              timer.cancel();
+              _progressTimer = null;
+              if (!completer.isCompleted) completer.complete();
+            }
+          });
+          await completer.future;
+          progressText.dispose();
+          debugPrint('✅ サムネイル生成完了');
+          if (mounted) {
+            ScaffoldMessenger.of(context).clearSnackBars();
           }
         }
       }
@@ -316,13 +374,13 @@ final ValueNotifier<String> _downloadStatus = ValueNotifier("");
       await _fetchMediaFromAPI();
 
       if (mounted) {
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).clearSnackBars();
       }
       
     } catch (e) {
       debugPrint('❌ スキャン＆リフレッシュエラー: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+        ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('❌ サーバーに接続できません。server.exe が起動しているか、サーバーのIPアドレスが正しいか確認してください。'),
@@ -510,12 +568,12 @@ setState(() {});
 _downloadStatus.value = '$total件ダウンロード完了';
 await Future.delayed(const Duration(seconds: 2));
 if (!mounted) return;
-ScaffoldMessenger.of(context).hideCurrentSnackBar();
+ScaffoldMessenger.of(context).clearSnackBars();
 
 await Future.delayed(const Duration(seconds: 2));
 
 if (!mounted) return;
-ScaffoldMessenger.of(context).hideCurrentSnackBar();
+ScaffoldMessenger.of(context).clearSnackBars();
 
 _clearSelection();
 }
