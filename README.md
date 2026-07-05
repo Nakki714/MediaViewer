@@ -130,7 +130,3 @@ MediaViewer/
 | 動画再生 | media_kit |
 
 ---
-
-## ライセンス
-
-MIT License
